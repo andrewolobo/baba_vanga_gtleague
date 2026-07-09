@@ -1,0 +1,272 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="light">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>The Totals Ledger · GT Leagues O/U Forecaster</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Newsreader:ital,opsz,wght@0,6..72,400;0,6..72,500;0,6..72,600;0,6..72,700;1,6..72,400;1,6..72,500&family=Archivo:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg:#faf6ef; --bg2:#f2ece1; --surface:#fffdf8; --ink:#221d17; --ink2:#6d6559;
+    --ink3:#9d9484; --line:#e7dfd1; --accent:#e2542a; --accentSoft:#fbe7dd;
+    --good:#3f9b6a; --bad:#cf4a3e; --gold:#b98a2c;
+  }
+  [data-theme="dark"] {
+    --bg:#151210; --bg2:#1d1914; --surface:#211c17; --ink:#f3ede2; --ink2:#a99f8f;
+    --ink3:#78705f; --line:#332d24; --accent:#f5713f; --accentSoft:#3a251b;
+    --good:#57ba86; --bad:#e26c60; --gold:#dcaf4f;
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--ink);
+         font-family:'Archivo',system-ui,sans-serif; }
+  .wrap { max-width:1180px; margin:0 auto; padding:56px 40px 72px; }
+  .serif { font-family:'Newsreader',serif; }
+  .meta { font-family:'Newsreader',serif; font-size:12.5px; letter-spacing:0.08em;
+          color:var(--ink2); }
+  .num { font-family:'Newsreader',serif; font-variant-numeric:tabular-nums; }
+
+  header.masthead { display:flex; justify-content:space-between; align-items:flex-end;
+    gap:24px; padding-bottom:18px; border-bottom:3px solid var(--ink); }
+  .eyebrow { display:flex; align-items:center; gap:9px; font-family:'Newsreader',serif;
+    font-size:12px; letter-spacing:0.22em; text-transform:uppercase;
+    color:var(--accent); font-weight:600; }
+  .eyebrow .dot { width:9px; height:9px; border-radius:99px; background:var(--accent); }
+  h1 { font-family:'Newsreader',serif; font-weight:700; font-size:56px;
+       line-height:0.96; letter-spacing:-0.025em; margin:10px 0 8px; }
+  .sub { font-family:'Newsreader',serif; font-size:13.5px; color:var(--ink2); }
+  .stat-badge { text-align:right; line-height:1; padding-right:14px;
+    border-right:1px solid var(--line); }
+  .stat-badge .v { font-family:'Newsreader',serif; font-weight:700; font-size:34px;
+    color:var(--accent); }
+  .stat-badge .k { font-family:'Newsreader',serif; font-size:10.5px;
+    letter-spacing:0.16em; color:var(--ink2); margin-top:4px; }
+  button.pill { cursor:pointer; font-family:'Newsreader',serif; font-size:12px;
+    letter-spacing:0.1em; font-weight:600; padding:9px 14px; border-radius:99px;
+    border:1px solid var(--line); background:transparent; color:var(--ink); }
+  button.pill.solid { background:var(--ink); color:var(--bg); border-color:var(--ink); }
+  button.pill.active { background:var(--ink); color:var(--bg); border-color:var(--ink); }
+
+  .status { display:flex; gap:14px; align-items:center; margin-top:22px;
+    padding:13px 18px; background:var(--accentSoft); border-radius:10px;
+    flex-wrap:wrap; }
+  .status .live { font-family:'Newsreader',serif; font-size:11px;
+    letter-spacing:0.14em; font-weight:600; color:var(--accent); white-space:nowrap; }
+  .status .item { font-size:13.5px; color:var(--ink); }
+  .status .item b { font-weight:600; }
+  .status .warn { color:var(--bad); font-weight:600; }
+
+  section { margin-top:52px; padding-top:34px; border-top:1px solid var(--line); }
+  section:first-of-type { border-top:none; padding-top:0; }
+  .sect-head { display:flex; align-items:baseline; gap:14px; margin-bottom:18px;
+    flex-wrap:wrap; }
+  .sect-head h3 { font-family:'Newsreader',serif; font-weight:700; font-size:30px;
+    margin:0; }
+  .chips { display:flex; gap:8px; flex-wrap:wrap; margin-bottom:18px; }
+
+  .grid3 { display:grid; grid-template-columns:repeat(3,1fr); gap:16px; }
+  .grid4 { display:grid; grid-template-columns:repeat(4,1fr); gap:14px; }
+  @media (max-width:980px){ .grid3{grid-template-columns:repeat(2,1fr);}
+    .grid4{grid-template-columns:repeat(2,1fr);} }
+  @media (max-width:640px){ .grid3,.grid4{grid-template-columns:1fr;} }
+
+  article.card { border:1px solid var(--line); border-radius:14px; padding:18px;
+    background:var(--surface); }
+  .card .top { display:flex; justify-content:space-between;
+    font-family:'Newsreader',serif; font-size:11px; letter-spacing:0.08em;
+    color:var(--ink2); margin-bottom:12px; }
+  .pair { font-size:13.5px; color:var(--ink2); }
+  .pair b { color:var(--ink); font-weight:700; font-size:14.5px; }
+  .headline { display:flex; justify-content:space-between; align-items:baseline;
+    margin:10px 0 4px; }
+  .headline .pick { font-family:'Newsreader',serif; font-weight:700; font-size:27px; }
+  .headline .nopick { color:var(--ink3); }
+  .tier { font-family:'Newsreader',serif; font-size:10.5px; letter-spacing:0.12em;
+    font-weight:700; padding:3px 10px; border-radius:99px; text-transform:uppercase; }
+  .tier.strong { background:var(--accent); color:#fff; }
+  .tier.solid { background:var(--ink); color:var(--bg); }
+  .tier.lean { background:var(--bg2); color:var(--ink2); border:1px solid var(--line); }
+  .bar { height:8px; border-radius:99px; background:var(--line); display:flex;
+    overflow:hidden; gap:2px; margin:9px 0; }
+  .bar .over { background:var(--accent); }
+  .bar .push { background:var(--gold); }
+  .bar .under { background:var(--ink3); }
+  .kv { display:flex; justify-content:space-between; font-size:12.5px;
+    color:var(--ink2); margin-top:5px; }
+  .kv .num { color:var(--ink); }
+  .badges { display:flex; gap:8px; margin-top:11px; padding-top:10px;
+    border-top:1px solid var(--line); align-items:center;
+    font-family:'Newsreader',serif; font-size:11px; letter-spacing:0.06em; }
+  .badge-value { color:var(--good); font-weight:700; }
+  .badge-cov { color:var(--ink3); }
+  .badge-cov.warn { color:var(--bad); font-weight:700; }
+
+  .tiles { display:grid; grid-template-columns:repeat(6,1fr); gap:14px; }
+  @media (max-width:980px){ .tiles{grid-template-columns:repeat(3,1fr);} }
+  .tile { border:1px solid var(--line); border-radius:14px; padding:16px 18px;
+    background:var(--surface); }
+  .tile .v { font-family:'Newsreader',serif; font-weight:700; font-size:30px; }
+  .tile .k { font-family:'Newsreader',serif; font-size:10.5px; letter-spacing:0.14em;
+    color:var(--ink2); margin-top:6px; text-transform:uppercase; }
+  .tile.accent .v { color:var(--accent); }
+
+  table.ledger { width:100%; border-collapse:collapse; }
+  .ledger th { font-family:'Newsreader',serif; font-size:10.5px; letter-spacing:0.1em;
+    color:var(--ink3); text-align:left; padding:0 8px 8px 0; font-weight:600;
+    border-bottom:1px solid var(--line); text-transform:uppercase; }
+  .ledger th.r, .ledger td.r { text-align:right; }
+  .ledger td { padding:9px 8px 9px 0; border-bottom:1px solid var(--line);
+    font-size:14px; }
+  .ledger td.num { font-size:13.5px; color:var(--ink2); }
+  .minibar { height:7px; border-radius:99px; background:var(--line); overflow:hidden; }
+  .minibar span { display:block; height:100%; background:var(--accent); }
+
+  article.settled { border:1px solid var(--line); border-left:4px solid var(--ink3);
+    border-radius:12px; padding:14px 15px; background:var(--surface); }
+  .settled.correct { border-left-color:var(--good); }
+  .settled.wrong { border-left-color:var(--bad); }
+  .settled.push { border-left-color:var(--gold); }
+  .settled .row { display:flex; justify-content:space-between; align-items:baseline; }
+  .settled .score { font-family:'Newsreader',serif; font-weight:700; font-size:20px; }
+  .settled .tag { font-family:'Newsreader',serif; font-size:11.5px; font-weight:600; }
+  .settled .tag.correct { color:var(--good); }
+  .settled .tag.wrong { color:var(--bad); }
+  .settled .tag.push { color:var(--gold); }
+  .settled .tag.no-pick { color:var(--ink3); }
+
+  footer { margin-top:64px; padding-top:16px; border-top:1px solid var(--line);
+    font-family:'Newsreader',serif; font-size:11.5px; letter-spacing:0.06em;
+    color:var(--ink3); display:flex; justify-content:space-between; flex-wrap:wrap;
+    gap:8px; }
+  .empty { padding:28px; text-align:center; color:var(--ink3);
+    font-family:'Newsreader',serif; font-size:14px; border:1px dashed var(--line);
+    border-radius:14px; }
+
+  nav.tabs { display:flex; gap:10px; margin-top:20px; }
+  nav.tabs a { font-family:'Newsreader',serif; font-size:13px; letter-spacing:0.1em;
+    font-weight:600; text-transform:uppercase; text-decoration:none;
+    padding:9px 16px; border-radius:99px; border:1px solid var(--line);
+    color:var(--ink2); }
+  nav.tabs a.active { background:var(--ink); color:var(--bg);
+    border-color:var(--ink); }
+
+  .chart-card { border:1px solid var(--line); border-radius:14px;
+    background:var(--surface); padding:20px 22px 12px; position:relative; }
+  .chart-card svg { width:100%; height:auto; display:block; }
+  .chart-card .loading { opacity:0.55; }
+  .panel-label { font-family:'Newsreader',serif; font-size:10.5px;
+    letter-spacing:0.14em; color:var(--ink2); text-transform:uppercase; }
+  .chart-tooltip { position:absolute; pointer-events:none; display:none;
+    background:var(--surface); border:1px solid var(--line); border-radius:10px;
+    padding:9px 12px; box-shadow:0 8px 24px -12px rgba(0,0,0,0.35);
+    font-size:12.5px; min-width:150px; z-index:5; }
+  .chart-tooltip .tt-date { font-family:'Newsreader',serif; font-size:11px;
+    letter-spacing:0.1em; color:var(--ink2); margin-bottom:5px; }
+  .chart-tooltip .tt-row { display:flex; align-items:center; gap:8px;
+    margin-top:3px; }
+  .chart-tooltip .tt-key { width:14px; height:0; border-top:3px solid var(--accent);
+    border-radius:2px; }
+  .chart-tooltip .tt-key.vol { border-top-color:var(--ink2); }
+  .chart-tooltip .tt-val { font-weight:700; font-variant-numeric:tabular-nums; }
+  .chart-tooltip .tt-lbl { color:var(--ink2); font-size:11.5px; }
+  @keyframes fadeUp { from{opacity:0;transform:translateY(8px);} to{opacity:1;} }
+  section, header.masthead, .status { animation:fadeUp .5s ease both; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header class="masthead">
+    <div>
+      <div class="eyebrow"><span class="dot"></span> GT Leagues · FC25 · Over/Under Forecaster</div>
+      <h1>The Totals Ledger</h1>
+      <div class="sub">Poisson attack/defence GLM · λ-blend (0.7 model / 0.3 form) ·
+        every listed line priced off one total-goals distribution</div>
+    </div>
+    <div style="display:flex;align-items:center;gap:12px;">
+      <div class="stat-badge">
+        <div class="v num" id="acc-badge">—</div>
+        <div class="k">7-DAY HIT RATE</div>
+      </div>
+      <button class="pill" id="theme-btn" title="Toggle theme">◐ DARK</button>
+    </div>
+  </header>
+
+  <nav class="tabs">
+    <a href="#ledger" id="tab-ledger" class="active">Ledger</a>
+    <a href="#analysis" id="tab-analysis">Analysis</a>
+  </nav>
+
+  <div class="status" id="status-strip">
+    <span class="live">● LIVE</span>
+    <span class="item meta">connecting…</span>
+  </div>
+
+  <div id="view-ledger">
+  <section>
+    <div class="sect-head">
+      <h3>Upcoming slate</h3>
+      <span class="meta" id="slate-meta"></span>
+    </div>
+    <div class="chips" id="tier-chips"></div>
+    <div class="grid3" id="slate"></div>
+  </section>
+
+  <section>
+    <div class="sect-head">
+      <h3>Scorecard</h3>
+      <span class="meta" id="scorecard-meta">rolling 7 days · headline line per event</span>
+    </div>
+    <div class="tiles" id="tiles"></div>
+    <div style="margin-top:18px;max-width:640px;" id="tier-table"></div>
+  </section>
+
+  <section>
+    <div class="sect-head">
+      <h3>Player form</h3>
+      <span class="meta">last 7 days · goals for/against per match · Over 3.5 rate</span>
+    </div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:0 48px;" id="players"></div>
+  </section>
+
+  <section>
+    <div class="sect-head">
+      <h3>Settled results</h3>
+      <span class="meta" id="settled-meta"></span>
+    </div>
+    <div class="grid4" id="settled"></div>
+  </section>
+  </div><!-- /view-ledger -->
+
+  <div id="view-analysis" hidden>
+    <section style="border-top:none;padding-top:0;">
+      <div class="sect-head">
+        <h3>Performance over time</h3>
+        <span class="meta">daily hit rate of graded headline picks · kickoff date (UTC)</span>
+      </div>
+      <div class="chips" id="analysis-range"></div>
+      <div class="chart-card" id="chart-card">
+        <div id="hitrate-chart"></div>
+        <div class="chart-tooltip" id="chart-tt"></div>
+      </div>
+    </section>
+
+    <section>
+      <div class="sect-head">
+        <h3>Settled results — model vs book</h3>
+        <span class="meta" id="analysis-table-meta"></span>
+      </div>
+      <div style="overflow-x:auto;" id="analysis-table"></div>
+    </section>
+  </div><!-- /view-analysis -->
+
+  <footer>
+    <span id="foot-model">model —</span>
+    <span>probabilistic forecasts · for information only</span>
+  </footer>
+
+</div>
+<script src="app.js"></script>
+</body>
+</html>

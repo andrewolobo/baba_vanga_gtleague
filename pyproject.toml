@@ -1,0 +1,41 @@
+[project]
+name = "gtleague"
+version = "0.1.0"
+description = "Over/Under prediction engine for GT Leagues (FC25) — Python ingestion/modeling side"
+requires-python = ">=3.11"
+dependencies = [
+    "httpx>=0.27",
+    "pydantic>=2.7",
+    "pydantic-settings>=2.3",
+    "numpy>=1.26",
+    "pandas>=2.2",
+    "scikit-learn>=1.4",
+    "scipy>=1.12",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0"]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+# Plan §3.1 layout: libs/py/* are shared libraries, services/py/* are runnable services.
+[tool.setuptools]
+packages = ["core", "store", "model", "results_ingest", "odds_ingest", "predictor",
+            "settlement"]
+
+[tool.setuptools.package-dir]
+core = "libs/py/core"
+store = "libs/py/store"
+model = "libs/py/model"
+results_ingest = "services/py/results_ingest"
+odds_ingest = "services/py/odds_ingest"
+predictor = "services/py/predictor"
+settlement = "services/py/settlement"
+
+[tool.setuptools.package-data]
+store = ["migrations/*.sql"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
