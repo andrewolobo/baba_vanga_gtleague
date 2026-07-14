@@ -51,6 +51,24 @@ def test_leakage_canary_auc_is_half():
         assert abs(m["auc_3.5"] - 0.5) < 0.06, f"{source} leaked: {m['auc_3.5']}"
 
 
+def test_multiform_legs_no_leak_and_signal():
+    """Multi-span form legs (FEATURE_IDEAS option 1) inherit both invariants:
+    AUC 0.5 on a no-signal league for every weight combo, and signal recovery
+    when the league has real rate differences."""
+    df = synthetic_df(days=30, per_day=40)
+    preds = evaluate.build_predictions(df, eval_days=10, extra_spans=(3, 30))
+    assert {"lam_f3_h", "lam_f3_a", "lam_f30_h", "lam_f30_a"} <= set(preds.columns)
+    for combo in evaluate.sweep_multiform(preds, (3, 30), step=0.5):
+        assert abs(combo["auc_3.5"] - 0.5) < 0.06, f"leaked: {combo}"
+
+    players = [f"P{i}" for i in range(10)]
+    rates = {p: (4.0 if i < 5 else 1.0) for i, p in enumerate(players)}
+    df = synthetic_df(days=30, per_day=40, players=players, rates=rates)
+    preds = evaluate.build_predictions(df, eval_days=10, extra_spans=(3, 30))
+    m = evaluate.metrics_weighted(preds, {"poisson": 0.5, "form30": 0.5})
+    assert m["auc_3.5"] > 0.75
+
+
 def test_signal_is_recovered():
     """A genuinely high-scoring player must be separable out of sample."""
     players = [f"P{i}" for i in range(10)]

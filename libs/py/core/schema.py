@@ -16,9 +16,11 @@ class MatchRow(BaseModel):
     date: str  # UTC calendar date of kickoff, YYYY-MM-DD
     kickoff_ts: datetime  # UTC
     competition: str  # e.g. "World Cup I / Group D"
-    home_player: str  # nickname — the model entity
+    home_player: str  # nickname — the primary model entity
     away_player: str
-    home_club: str  # team/country label; no marginal signal (parent §2.1.2)
+    # Team/country label. The parent league found no marginal signal here; this
+    # one does (+0.59 AUC pts over the served blend) — see docs/CLUB_FEATURE.md.
+    home_club: str
     away_club: str
     status: int  # 0 scheduled / 3 finished / 4 cancelled (core.config)
     home_ft: int | None  # null unless status == 3
@@ -53,8 +55,28 @@ class PredictionRow(BaseModel):
     lambda_home: float | None  # None when totals_source == 'book'
     lambda_away: float | None
     pick: str | None  # over/under; None if below pick gates or uncovered
-    confidence: float | None  # 0.5*model + 0.5*book prob of the picked side
+    confidence: float | None  # model prob of the picked side (see cycle._line_row)
     tier: str | None  # lean | solid | strong
+    value_flag: bool = False
+    model_version: str
+    as_of_cutoff_ts: datetime
+
+
+class X12PredictionRow(BaseModel):
+    """One 1x2 (match-winner) prediction for one fixture at one moment
+    (append-only). Priced off the same served side-λs as the totals rows —
+    there is no separate model, so no totals_source and no book fallback:
+    an uncovered fixture simply gets no x12 row."""
+
+    event_id: str
+    predicted_at: datetime
+    p_home: float
+    p_draw: float
+    p_away: float
+    lambda_home: float
+    lambda_away: float
+    pick: str | None  # home/draw/away; None below the x12 pick gate
+    confidence: float | None  # max outcome prob (see X12_PICK_PROB_THRESHOLD)
     value_flag: bool = False
     model_version: str
     as_of_cutoff_ts: datetime

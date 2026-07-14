@@ -27,6 +27,28 @@ def poisson_pmf(lam: float, max_goals: int) -> list[float]:
     return [math.exp(-lam) * lam**k / math.factorial(k) for k in range(max_goals + 1)]
 
 
+def x12_probs(lam_home: float, lam_away: float,
+              max_goals: int) -> tuple[float, float, float]:
+    """(p_home, p_draw, p_away) from independent Poisson side scores.
+
+    P(draw) = Σ_k p_h(k)·p_a(k);  P(home) = Σ_i p_h(i)·P(A < i);  away is the
+    remainder, which also absorbs the negligible tail beyond max_goals.
+    Independence is the same assumption the O/U pricing already makes by
+    summing λs; whether it underprices draws HERE is an empirical question
+    (docs/CLUB_FEATURE.md 1x2 track) — do not bolt on a Dixon-Coles diagonal
+    until the walk-forward says the draw mass is actually short.
+    """
+    ph = poisson_pmf(lam_home, max_goals)
+    pa = poisson_pmf(lam_away, max_goals)
+    cdf_a = 0.0
+    p_home = p_draw = 0.0
+    for k in range(max_goals + 1):
+        p_home += ph[k] * cdf_a  # P(away < k)
+        p_draw += ph[k] * pa[k]
+        cdf_a += pa[k]
+    return p_home, p_draw, max(0.0, 1.0 - p_home - p_draw)
+
+
 def margin_free(odds: list[float]) -> list[float]:
     """De-vig by proportional normalization: 1/odds scaled to sum to 1.
 

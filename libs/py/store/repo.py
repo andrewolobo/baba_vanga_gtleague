@@ -4,7 +4,8 @@ import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
-from core.schema import FixtureRow, MatchRow, OddsPrice, PredictionRow
+from core.schema import (FixtureRow, MatchRow, OddsPrice, PredictionRow,
+                         X12PredictionRow)
 
 
 def _iso(dt: datetime) -> str:
@@ -122,6 +123,25 @@ class PredictionRepo:
                   r.p_over, r.p_push, r.p_under, r.lambda_home, r.lambda_away,
                   r.pick, r.confidence, r.tier, int(r.value_flag),
                   r.model_version, _iso(r.as_of_cutoff_ts)) for r in rows],
+            )
+        return len(rows)
+
+
+class X12PredictionRepo:
+    def __init__(self, conn: sqlite3.Connection):
+        self.conn = conn
+
+    def append_many(self, rows: list[X12PredictionRow]) -> int:
+        with self.conn:
+            self.conn.executemany(
+                "INSERT INTO predictions_x12 (event_id, predicted_at, p_home,"
+                " p_draw, p_away, lambda_home, lambda_away, pick, confidence,"
+                " value_flag, model_version, as_of_cutoff_ts)"
+                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                [(r.event_id, _iso(r.predicted_at), r.p_home, r.p_draw,
+                  r.p_away, r.lambda_home, r.lambda_away, r.pick, r.confidence,
+                  int(r.value_flag), r.model_version, _iso(r.as_of_cutoff_ts))
+                 for r in rows],
             )
         return len(rows)
 

@@ -7,8 +7,40 @@ const esc = (s) => String(s ?? '').replace(/[&<>"]/g,
   (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 const pct = (x, dp = 1) => x == null ? '—' : (x * 100).toFixed(dp) + '%';
 
+/* ---------- time: render every timestamp in the viewer's own zone ----------
+   Source values are UTC ISO strings (…+00:00 from the store), so new Date()
+   parses the correct instant and the toLocale* calls project it into the
+   local zone. TZ_LABEL (e.g. "GMT+3") is shown once in the status strip so
+   the bare wall-clock times on cards and rows stay unambiguous. Day buckets
+   for the daily charts use localDay too, so a row's date always agrees with
+   the bucket it lands in. */
+const TZ_LABEL = (() => {
+  try {
+    const p = new Intl.DateTimeFormat(undefined, { timeZoneName: 'short' })
+      .formatToParts(new Date()).find((x) => x.type === 'timeZoneName');
+    return p ? p.value : 'local time';
+  } catch { return 'local time'; }
+})();
+const localDay = (iso) => {            // YYYY-MM-DD, local, lexically sortable
+  const d = iso ? new Date(iso) : NaN;  // guard null -> epoch, not ''
+  return isNaN(d) ? '' : d.toLocaleDateString('en-CA');
+};
+const localHM = (iso) => {             // HH:MM, 24h, local
+  const d = iso ? new Date(iso) : NaN;
+  return isNaN(d) ? '' : d.toLocaleTimeString('en-GB',
+    { hour: '2-digit', minute: '2-digit' });
+};
+const localDHM = (iso) => {            // "MM-DD HH:MM", local
+  const day = localDay(iso);
+  return day ? `${day.slice(5)} ${localHM(iso)}` : '';
+};
+
+// x12: one shared display toggle for the whole app (both views), off unless
+// the user opted in — persisted so Ledger and Performance always agree
+// (docs/X12_UI.md). It only reveals fields the API already serves.
 const state = { slate: [], metrics: null, players: [], settled: [],
-                health: null, filter: 'all' };
+                health: null, filter: 'all', line: 'all',
+                x12: localStorage.getItem('x12ui') === '1' };
 
 async function getJSON(url) {
   const r = await fetch(url);
@@ -33,6 +65,7 @@ function renderStatus() {
     <span class="item">odds <b>${ageTxt(f.odds)}</b></span>
     <span class="item">predictions <b>${ageTxt(f.predictions)}</b></span>
     ${cd != null ? `<span class="item">next kickoff in <b>${cd}m</b></span>` : ''}
+    <span class="item">times in <b>${TZ_LABEL}</b></span>
     ${gap > 1 ? `<span class="item warn">⚠ results gap ${gap}d — catch-up backfill in progress</span>` : ''}
     ${bad ? '<span class="item warn">⚠ pipeline attention needed</span>'
           : '<span class="item" style="color:var(--good);font-weight:600;">✓ pipeline healthy</span>'}`;
@@ -40,38 +73,142 @@ function renderStatus() {
 
 /* ---------- slate ---------- */
 
-const FILTERS = ['all', 'strong', 'solid', 'lean', 'value'];
+// 'value' = model beats the book's price by >= MIN_EDGE on some line.
+// 'book'  = the book has priced this fixture at all (the rest are model-only
+//           cards for league-scheduled games with no odds yet).
+// 1x2 mode has no tiers (none exist until bands are quantiled on served
+// picks) and no lines, so its chip set is its own.
+const FILTERS_OU = ['all', 'strong', 'solid', 'lean', 'value', 'book'];
+const FILTERS_X12 = ['all', 'picks', 'value', 'book'];
+const FILTER_LABEL = { book: 'BOOK PRICED' };
+const filterSet = () => state.x12 ? FILTERS_X12 : FILTERS_OU;
 
+/* With a line selected the card must speak about THAT line, not the model's
+   favourite — otherwise filtering to 2.5 would still show you the 4.5 pick. */
 function headlineLine(fx) {
+  if (state.line !== 'all') {
+    return fx.lines.find((l) => String(l.line) === state.line) ?? null;
+  }
   const picked = fx.lines.filter((l) => l.pick);
   if (!picked.length) return fx.lines[0] ?? null;
   return picked.sort((a, b) => (b.confidence ?? 0) - (a.confidence ?? 0))[0];
 }
 
 function renderChips() {
-  $('tier-chips').innerHTML = FILTERS.map((f) =>
+  const fs = filterSet();
+  if (!fs.includes(state.filter)) state.filter = 'all'; // mode switch resets
+  $('tier-chips').innerHTML = fs.map((f) =>
     `<button class="pill ${state.filter === f ? 'active' : ''}" data-f="${f}">
-       ${f.toUpperCase()}</button>`).join('');
+       ${FILTER_LABEL[f] ?? f.toUpperCase()}</button>`).join('');
   for (const b of $('tier-chips').querySelectorAll('button')) {
     b.onclick = () => { state.filter = b.dataset.f; renderSlate(); };
   }
 }
 
+/* Lines come and go with the slate, so rebuild each render and drop a
+   selection the current slate no longer offers. */
+function slateLines() {
+  return [...new Set(state.slate.flatMap((fx) => fx.lines.map((l) => l.line)))]
+    .sort((a, b) => a - b);
+}
+
+function renderLineChips() {
+  if (state.x12) { // lines are a totals concept
+    $('line-chips').innerHTML = '';
+    return;
+  }
+  const lines = slateLines();
+  if (state.line !== 'all' && !lines.some((l) => String(l) === state.line)) {
+    state.line = 'all';
+  }
+  $('line-chips').innerHTML = [['all', 'ALL LINES'],
+    ...lines.map((l) => [String(l), `O/U ${l}`])]
+    .map(([v, label]) => `<button class="pill ${state.line === v ? 'active' : ''}"
+       data-l="${v}">${label}</button>`).join('');
+  for (const b of $('line-chips').querySelectorAll('button')) {
+    b.onclick = () => { state.line = b.dataset.l; renderSlate(); };
+  }
+}
+
 function slateVisible() {
+  if (state.x12) {
+    return state.slate.filter((fx) => {
+      if (state.filter === 'picks') return !!fx.x12?.pick;
+      if (state.filter === 'value') return !!fx.x12?.value;
+      if (state.filter === 'book') return fx.priced;
+      return true;
+    });
+  }
   return state.slate.filter((fx) => {
     const h = headlineLine(fx);
-    if (!h) return false;
+    if (!h) return false; // fixture doesn't offer the selected line
     if (state.filter === 'all') return true;
-    if (state.filter === 'value') return fx.lines.some((l) => l.value);
+    if (state.filter === 'book') return fx.priced;
+    // scope value to the selected line, so the chip and the card agree
+    if (state.filter === 'value') {
+      return state.line === 'all' ? fx.lines.some((l) => l.value) : h.value;
+    }
     return h.tier === state.filter;
   });
+}
+
+/* 1x2-mode fixture card: same frame as the O/U card, entirely 1x2 content —
+   the toggle swaps markets, it never blends them. Confidence is shown raw as
+   the headline chip; no tier chips, deliberately: bands don't exist until
+   quantiled on served picks (docs/X12_SERVING.md). */
+function x12FixtureCard(fx) {
+  const x = fx.x12;
+  const kick = new Date(fx.kickoff);
+  const mins = Math.max(0, Math.round((kick - Date.now()) / 60000));
+  const hh = localHM(fx.kickoff);
+  const covWarn = fx.coverage !== 'full';
+  return `<article class="card">
+    <div class="top"><span><b>${hh}</b> · in ${mins}m</span>
+      <span>${esc(fx.competition)}</span></div>
+    <div class="pair">${esc(fx.home.club)} <b>${esc(fx.home.player ?? '?')}</b></div>
+    <div class="pair" style="margin-top:2px;">${esc(fx.away.club)}
+      <b>${esc(fx.away.player ?? '?')}</b></div>
+    <div class="headline">
+      <span class="pick serif ${x?.pick ? '' : 'nopick'}">
+        ${x?.pick ? esc(x.pick.toUpperCase()) : '1X2'}</span>
+      ${x?.pick ? `<span class="tier solid">${pct(x.confidence)}</span>` : ''}
+    </div>
+    ${x ? `
+    <div class="bar x12-bar" title="home / draw / away">
+      <div class="h" style="width:${x.p_home * 100}%"></div>
+      <div class="d" style="width:${x.p_draw * 100}%"></div>
+      <div class="a" style="width:${x.p_away * 100}%"></div>
+    </div>
+    <div class="kv"><span>Model H/D/A</span>
+      <span class="num">${pct(x.p_home)} / ${pct(x.p_draw)} / ${pct(x.p_away)}</span></div>
+    ${fx.priced ? `
+    <div class="kv"><span>Book H/D/A</span>
+      <span class="num">${pct(x.book.home)} / ${pct(x.book.draw)} / ${pct(x.book.away)}</span></div>
+    <div class="kv"><span>Odds</span>
+      <span class="num">${x.odds.home ?? '—'} / ${x.odds.draw ?? '—'} / ${x.odds.away ?? '—'}</span></div>
+    ${x.edge != null ? `<div class="kv"><span>Edge (model side)</span>
+      <span class="num" style="color:${x.edge >= 0 ? 'var(--good)' : 'var(--bad)'}">
+      ${x.edge >= 0 ? '+' : ''}${(x.edge * 100).toFixed(1)} pts</span></div>` : ''}`
+    : `<div class="kv"><span>Book</span>
+      <span class="num" style="color:var(--ink3);">awaiting odds</span></div>`}`
+    : `<div class="kv" style="margin-top:10px;">
+      <span style="color:var(--ink3);">no 1x2 data yet</span></div>`}
+    <div class="badges">
+      ${x?.value ? '<span class="badge-value">▲ VALUE</span>' : ''}
+      ${!fx.priced ? '<span class="badge-cov">◌ model-only · book not yet priced</span>'
+        : `<span class="badge-cov ${covWarn ? 'warn' : ''}">
+        ${covWarn ? '◌ coverage ' + esc(fx.coverage) : '● full coverage'}</span>`}
+      <span style="margin-left:auto;color:var(--ink3);">λ ${fx.lambda_home ?? '—'}
+        / ${fx.lambda_away ?? '—'}</span>
+    </div>
+  </article>`;
 }
 
 function fixtureCard(fx) {
   const h = headlineLine(fx);
   const kick = new Date(fx.kickoff);
   const mins = Math.max(0, Math.round((kick - Date.now()) / 60000));
-  const hh = kick.toISOString().slice(11, 16);
+  const hh = localHM(fx.kickoff);
   const pickTxt = h?.pick
     ? `${h.pick.toUpperCase()} ${h.line}`
     : `O/U ${h?.line ?? '—'}`;
@@ -79,7 +216,7 @@ function fixtureCard(fx) {
         under = (h?.p_under ?? 0) * 100;
   const covWarn = fx.coverage !== 'full';
   return `<article class="card">
-    <div class="top"><span><b>${hh}Z</b> · in ${mins}m</span>
+    <div class="top"><span><b>${hh}</b> · in ${mins}m</span>
       <span>${esc(fx.competition)}</span></div>
     <div class="pair">${esc(fx.home.club)} <b>${esc(fx.home.player ?? '?')}</b></div>
     <div class="pair" style="margin-top:2px;">${esc(fx.away.club)}
@@ -118,13 +255,20 @@ function fixtureCard(fx) {
 
 function renderSlate() {
   renderChips();
+  renderLineChips();
   const vis = slateVisible();
-  const nPicks = state.slate.filter((fx) => headlineLine(fx)?.pick).length;
   const nPriced = state.slate.filter((fx) => fx.priced).length;
+  const nPicks = state.x12
+    ? state.slate.filter((fx) => fx.x12?.pick).length
+    : state.slate.filter((fx) => headlineLine(fx)?.pick).length;
+  const scope = state.x12 || state.line === 'all' ? state.filter
+    : `${state.filter} · O/U ${state.line}`;
   $('slate-meta').textContent =
-    `${state.slate.length} upcoming · ${nPriced} priced by book · ${nPicks} picks · filter: ${state.filter}`;
+    `${state.slate.length} upcoming · ${nPriced} priced by book`
+    + ` · ${nPicks} ${state.x12 ? '1x2 ' : ''}picks`
+    + ` · showing ${vis.length} · filter: ${scope}`;
   $('slate').innerHTML = vis.length
-    ? vis.map(fixtureCard).join('')
+    ? vis.map(state.x12 ? x12FixtureCard : fixtureCard).join('')
     : `<div class="empty" style="grid-column:1/-1;">no fixtures match —
        the book prices ~1h ahead, so an empty slate usually just means
        between-rounds. It refreshes automatically.</div>`;
@@ -132,23 +276,45 @@ function renderSlate() {
 
 /* ---------- scorecard ---------- */
 
-function renderScorecard() {
-  const m = state.metrics;
-  if (!m) return;
-  $('acc-badge').textContent = m.hit_rate != null ? pct(m.hit_rate, 0) : '—';
-  const tiles = [
-    ['SETTLED', m.settled, ''],
-    ['GRADED PICKS', m.graded, ''],
+/* Two prediction populations, reported separately and never pooled
+   (docs/POPULATION_SPLIT.md): model-only (schedule) picks are the product's
+   real signal; book-priced picks are rare by design once recal saturates. */
+const tilesHtml = (tiles) => tiles.map(([k, v, cls]) =>
+  `<div class="tile ${cls}"><div class="v num">${v}</div>
+   <div class="k">${k}</div></div>`).join('');
+
+function popTiles(m) {
+  return tilesHtml([
+    ['SETTLED', m.settled ?? 0, ''],
+    ['GRADED PICKS', m.graded ?? 0, ''],
     ['HIT RATE', m.hit_rate != null ? pct(m.hit_rate) : '—', 'accent'],
     ['MODEL BRIER', m.brier_model?.toFixed(4) ?? '—', ''],
     ['REGEN AGREE', m.regen_agreement != null ? pct(m.regen_agreement, 0) : '—',
       m.regen_agreement != null && m.regen_agreement < 1 ? 'accent' : ''],
-    ['LEAK FLAGS', m.leak_risk_count, m.leak_risk_count ? 'accent' : ''],
-  ];
-  $('tiles').innerHTML = tiles.map(([k, v, cls]) =>
-    `<div class="tile ${cls}"><div class="v num">${v}</div>
-     <div class="k">${k}</div></div>`).join('');
+    ['LEAK FLAGS', m.leak_risk_count ?? 0, m.leak_risk_count ? 'accent' : ''],
+  ]);
+}
 
+/* 1x2 scorecard rows: same population split as totals, never pooled with the
+   O/U tiles above. Value tiles replace the tier table the totals side has —
+   x12 has no tiers yet by design. */
+function x12Tiles(m) {
+  // regen's denominator is the graded picks, not the settled rows — name the
+  // count so a 1-pick sample can't masquerade as a trend
+  const n = m.graded ?? 0;
+  return tilesHtml([
+    ['SETTLED', m.settled ?? 0, ''],
+    ['GRADED PICKS', m.graded ?? 0, ''],
+    ['HIT RATE', m.hit_rate != null ? pct(m.hit_rate) : '—', 'accent'],
+    ['VALUE PICKS', m.value?.n ?? 0, ''],
+    ['VALUE HIT', m.value?.hit_rate != null ? pct(m.value.hit_rate) : '—', ''],
+    [`REGEN AGREE · ${n} PICK${n === 1 ? '' : 'S'}`,
+      m.regen_agreement != null ? pct(m.regen_agreement, 0) : '—',
+      m.regen_agreement != null && m.regen_agreement < 1 ? 'accent' : ''],
+  ]);
+}
+
+function popTierTable(m, withValue) {
   const rows = ['strong', 'solid', 'lean'].map((t) => {
     const x = m.tiers?.[t];
     return `<tr><td style="text-transform:capitalize;">${t}</td>
@@ -158,14 +324,39 @@ function renderScorecard() {
         <span style="width:${(x?.hit_rate ?? 0) * 100}%"></span></div></td></tr>`;
   }).join('');
   const v = m.value;
-  $('tier-table').innerHTML = `<table class="ledger">
-    <thead><tr><th>Tier</th><th class="r">Picks</th><th class="r">Hit</th><th></th></tr></thead>
-    <tbody>${rows}
-      <tr><td>value flag</td><td class="num r">${v?.n ?? 0}</td>
+  // value needs a price to beat, so the row only exists for the priced side
+  const valueRow = withValue
+    ? `<tr><td>value flag</td><td class="num r">${v?.n ?? 0}</td>
         <td class="num r">${v?.hit_rate != null ? pct(v.hit_rate) : '—'}</td>
         <td><div class="minibar"><span style="width:${(v?.hit_rate ?? 0) * 100}%;
-          background:var(--good);"></span></div></td></tr>
-    </tbody></table>`;
+          background:var(--good);"></span></div></td></tr>`
+    : '';
+  return `<table class="ledger">
+    <thead><tr><th>Tier</th><th class="r">Picks</th><th class="r">Hit</th><th></th></tr></thead>
+    <tbody>${rows}${valueRow}</tbody></table>`;
+}
+
+function renderScorecard() {
+  const m = state.metrics;
+  if (!m?.schedule || !m?.priced) return;
+  // masthead badge follows the active market
+  const badgeRate = state.x12 ? m.x12?.schedule?.hit_rate : m.schedule.hit_rate;
+  $('acc-badge').textContent = badgeRate != null ? pct(badgeRate, 0) : '—';
+  $('acc-badge-k').textContent =
+    state.x12 ? '7D 1X2 HIT · MODEL-ONLY' : '7D HIT · MODEL-ONLY';
+  $('ou-scorecard').hidden = state.x12;
+  $('x12-scorecard').hidden = !state.x12;
+  if (state.x12) {
+    if (m.x12) {
+      $('tiles-x12-schedule').innerHTML = x12Tiles(m.x12.schedule);
+      $('tiles-x12-priced').innerHTML = x12Tiles(m.x12.priced);
+    }
+    return;
+  }
+  $('tiles-schedule').innerHTML = popTiles(m.schedule);
+  $('tiles-priced').innerHTML = popTiles(m.priced);
+  $('tier-table-schedule').innerHTML = popTierTable(m.schedule, false);
+  $('tier-table-priced').innerHTML = popTierTable(m.priced, true);
 }
 
 /* ---------- players ---------- */
@@ -190,13 +381,33 @@ function renderPlayers() {
 /* ---------- settled ---------- */
 
 function settledCard(s) {
-  const kick = s.start_time_utc?.slice(11, 16) ?? '';
-  const tag = { correct: '✓ pick correct', wrong: '✕ pick wrong',
-                push: '— push', 'no-pick': '· no pick' }[s.outcome];
-  return `<article class="settled ${s.outcome}">
+  const kick = s.start_time_utc ? localHM(s.start_time_utc) : '';
+  // 1x2 mode grades the card on the x12 settlement; events settled before the
+  // head went live have no x12 row and read as ungraded, not as wrong
+  const x12Cls = s.x12_outcome === 'correct' || s.x12_outcome === 'wrong'
+    ? s.x12_outcome : 'no-pick';
+  const cls = state.x12 ? x12Cls : s.outcome;
+  const tag = state.x12
+    ? (s.x12_outcome == null ? '· not graded for 1x2'
+       : { correct: '✓ 1x2 pick correct', wrong: '✕ 1x2 pick wrong',
+           'no-pick': '· no 1x2 pick' }[s.x12_outcome])
+    : { correct: '✓ pick correct', wrong: '✕ pick wrong',
+        push: '— push', 'no-pick': '· no pick' }[s.outcome];
+  const detail = state.x12
+    ? (s.x12_outcome == null ? '—'
+       : `${s.x12_pick ? esc(s.x12_pick) + ' · ' : ''}winner ${esc(s.x12_result)}`)
+    : `${s.pick ? esc(s.pick) + ' ' + s.line : 'O/U ' + s.line}
+        · total ${s.result_total}`;
+  return `<article class="settled ${cls}">
     <div class="top meta" style="display:flex;justify-content:space-between;
-      margin-bottom:8px;"><span>${kick}Z</span>
-      ${s.tier ? `<span class="tier ${s.tier}">${s.tier}</span>` : ''}</div>
+      align-items:center;gap:6px;margin-bottom:8px;"><span>${kick}</span>
+      ${s.population === 'schedule'
+        ? '<span class="badge-cov" title="league-schedule game the book never priced — informational, not bettable">◌ model-only</span>'
+        : ''}
+      ${state.x12
+        ? (s.x12_confidence != null
+           ? `<span class="tier solid">${pct(s.x12_confidence)}</span>` : '')
+        : (s.tier ? `<span class="tier ${s.tier}">${s.tier}</span>` : '')}</div>
     <div class="row"><span class="pair">${esc(s.home_club)}
       <b>${esc((s.home_raw.match(/\(([^)]*)\)/) || [])[1] ?? '')}</b></span>
       <span class="score num">${s.home_ft ?? '–'}</span></div>
@@ -205,9 +416,8 @@ function settledCard(s) {
       <span class="score num">${s.away_ft ?? '–'}</span></div>
     <div style="display:flex;justify-content:space-between;margin-top:10px;
       padding-top:9px;border-top:1px solid var(--line);" class="meta">
-      <span class="tag ${s.outcome}">${tag}</span>
-      <span>${s.pick ? esc(s.pick) + ' ' + s.line : 'O/U ' + s.line}
-        · total ${s.result_total}</span></div>
+      <span class="tag ${cls}">${tag}</span>
+      <span>${detail}</span></div>
   </article>`;
 }
 
@@ -221,28 +431,19 @@ function renderSettled() {
        settlements appear ~45 minutes after each predicted kickoff.</div>`;
 }
 
-/* ---------- analysis tab ---------- */
+/* ---------- rate chart (shared) ---------- */
 
-const analysis = { days: 30, data: null };
 const RANGES = [[7, '7D'], [30, '30D'], [90, '90D'], [365, 'ALL']];
 
-function renderRangeChips() {
-  $('analysis-range').innerHTML = RANGES.map(([d, label]) =>
-    `<button class="pill ${analysis.days === d ? 'active' : ''}" data-d="${d}">
-       ${label}</button>`).join('');
-  for (const b of $('analysis-range').querySelectorAll('button')) {
-    b.onclick = () => { analysis.days = Number(b.dataset.d); void loadAnalysis(); };
-  }
-}
-
 /* Two stacked panels, one shared x — never a dual axis: rate line on its own
-   0–100% scale, graded-pick volume as columns on its own count scale. */
-function renderHitrateChart() {
-  const daily = analysis.data?.daily ?? [];
-  const host = $('hitrate-chart');
+   0–100% scale, volume as columns on its own count scale.
+
+   daily rows are { date, graded, hits, hit_rate }; `noun` names what `graded`
+   counts, since the no-picks tab plots would-be results rather than picks. */
+function renderRateChart({ hostId, ttId, cardId, daily, rateLabel, noun, empty }) {
+  const host = $(hostId);
   if (daily.length < 2) {
-    host.innerHTML = `<div class="empty">not enough graded days yet —
-      the chart appears once picks settle on two or more days.</div>`;
+    host.innerHTML = `<div class="empty">${empty}</div>`;
     return;
   }
   const W = 1000, H = 340, L = 46, R = 16;
@@ -262,9 +463,9 @@ function renderHitrateChart() {
            fill="var(--ink3)" style="font-variant-numeric:tabular-nums;">${g * 100}</text>`;
   }
   s += `<text x="${L}" y="14" class="panel-label" font-size="10.5"
-         fill="var(--ink2)" letter-spacing="1.5">DAILY HIT RATE %</text>
+         fill="var(--ink2)" letter-spacing="1.5">${rateLabel}</text>
         <text x="${L}" y="${volTop - 8}" font-size="10.5" fill="var(--ink2)"
-         letter-spacing="1.5">GRADED PICKS · max ${maxVol}</text>`;
+         letter-spacing="1.5">${noun.toUpperCase()} · max ${maxVol}</text>`;
 
   // volume columns: thin, rounded data-end, square baseline, surface gaps by slot
   const slot = (W - L - R) / n;
@@ -303,7 +504,7 @@ function renderHitrateChart() {
   // crosshair + one tooltip for both panels; whole-slot hit target
   const svg = host.querySelector('svg');
   const xhair = svg.querySelector('#xhair');
-  const tt = $('chart-tt');
+  const tt = $(ttId);
   const show = (i, clientX, clientY) => {
     xhair.setAttribute('x1', x(i)); xhair.setAttribute('x2', x(i));
     xhair.setAttribute('visibility', 'visible');
@@ -322,9 +523,9 @@ function renderHitrateChart() {
       r.append(k, v, l); tt.appendChild(r);
     };
     row('', `${Math.round(d.hit_rate * 100)}%`, `hit rate (${d.hits}/${d.graded})`);
-    row('vol', String(d.graded), 'graded picks');
+    row('vol', String(d.graded), noun);
     tt.style.display = 'block';
-    const card = $('chart-card').getBoundingClientRect();
+    const card = $(cardId).getBoundingClientRect();
     const ttW = tt.offsetWidth;
     let px = clientX - card.left + 14;
     if (px + ttW > card.width - 8) px = clientX - card.left - ttW - 14;
@@ -344,65 +545,936 @@ function renderHitrateChart() {
   });
 }
 
-function renderAnalysisTable() {
-  const xs = analysis.data?.settlements ?? [];
-  $('analysis-table-meta').textContent =
-    `${xs.length} settled events in window · probabilities are for the Over side`;
-  if (!xs.length) {
-    $('analysis-table').innerHTML =
-      '<div class="empty">no settled results in this window yet.</div>';
+/* ---------- model performance tab ----------
+
+   Every settled event, graded on the side the model leaned — whether or not
+   that lean cleared the pick gate. Both populations are graded the same way,
+   off /api/analysis's model_side_correct, which is derived from the result and
+   never feeds the Ledger scorecard. That symmetry is the point: it is what
+   makes picked and suppressed rows comparable at all.
+
+   Rows the model had no coverage of (model_side null) served the book's own
+   price back and are excluded — they carry no model opinion to grade. */
+
+const perf = { days: 30, data: null,
+               sort: { key: 'kickoff', dir: 'desc' },
+               filters: { match: '', population: 'all', gate: 'all',
+                          line: 'all', side: 'all', outcome: 'all' } };
+const P_FILTER_IDS = { match: 'p-match', population: 'p-pop', gate: 'p-gate',
+                       line: 'p-line', side: 'p-side', outcome: 'p-outcome' };
+
+const outcomeOf = (r) => r.model_side_correct == null ? 'push'
+  : r.model_side_correct ? 'hit' : 'miss';
+const isPick = (r) => r.pick != null;
+
+function perfRows() {
+  return (perf.data?.settlements ?? []).filter((r) => r.model_side != null);
+}
+
+function perfFiltersActive() {
+  const f = perf.filters;
+  return !!f.match.trim() || f.gate !== 'all' || f.line !== 'all'
+    || f.side !== 'all' || f.outcome !== 'all';
+}
+
+function perfMatches(r) {
+  const f = perf.filters;
+  if (f.population !== 'all' && r.population !== f.population) return false;
+  if (f.gate === 'picks' && !isPick(r)) return false;
+  if (f.gate === 'nopicks' && isPick(r)) return false;
+  if (f.line !== 'all' && String(r.line) !== f.line) return false;
+  if (f.side !== 'all' && r.model_side !== f.side) return false;
+  if (f.outcome !== 'all' && outcomeOf(r) !== f.outcome) return false;
+  const q = f.match.trim().toLowerCase();
+  if (q) {
+    const hay = [r.home_player, r.away_player, r.home_club, r.away_club]
+      .filter(Boolean).join(' ').toLowerCase();
+    if (!hay.includes(q)) return false;
+  }
+  return true;
+}
+
+/* Pushes are ungradable, so every rate divides by the graded subset only —
+   never by row count, which would silently deflate each rate. */
+const graded = (xs) => xs.filter((r) => r.model_side_correct != null);
+const hitRate = (xs) => xs.length
+  ? xs.reduce((a, r) => a + r.model_side_correct, 0) / xs.length : null;
+const brierOf = (xs) => xs.length
+  ? xs.reduce((a, r) =>
+      a + (r.model_p_over - (r.result_total > r.line ? 1 : 0)) ** 2, 0) / xs.length
+  : null;
+
+/* The caveat is conditional: it is only a counterfactual when suppressed rows
+   are in scope. Showing it over a picks-only view would be a lie. */
+function renderPerfCaveat(xs) {
+  const sup = xs.filter((r) => !isPick(r)).length;
+  const sched = xs.filter((r) => r.population === 'schedule').length;
+  const el = $('perf-caveat');
+  if (!sup && !sched) {
+    el.hidden = true;
     return;
   }
-  const sym = { correct: '✓', wrong: '✕', push: '—', 'no-pick': '·' };
-  const col = { correct: 'var(--good)', wrong: 'var(--bad)',
-                push: 'var(--gold)', 'no-pick': 'var(--ink3)' };
-  const rows = xs.map((r) => `<tr>
-    <td class="num" style="white-space:nowrap;color:var(--ink2);">
-      ${r.kickoff.slice(5, 10)} ${r.kickoff.slice(11, 16)}Z</td>
-    <td style="font-weight:600;">${esc(r.home_player ?? r.home_club)}
-      <span style="color:var(--ink3);">v</span>
-      ${esc(r.away_player ?? r.away_club)}</td>
-    <td class="num r">${r.line}</td>
-    <td>${r.pick ? esc(r.pick) : '<span style="color:var(--ink3);">—</span>'}
-      ${r.tier ? `<span class="tier ${r.tier}">${r.tier}</span>` : ''}</td>
-    <td class="num r">${pct(r.model_p_over)}</td>
-    <td class="num r">${pct(r.book_p_over)}</td>
-    <td class="num r" style="color:${r.book_p_over != null
-      ? (r.model_p_over - r.book_p_over >= 0 ? 'var(--good)' : 'var(--bad)') : 'var(--ink3)'};">
-      ${r.book_p_over != null
-        ? ((r.model_p_over - r.book_p_over) * 100).toFixed(1) : '—'}</td>
-    <td class="num r" style="font-weight:700;">${r.result_total}</td>
-    <td style="color:${col[r.outcome]};font-weight:600;white-space:nowrap;">
-      ${sym[r.outcome]} ${r.outcome}</td>
-  </tr>`).join('');
-  $('analysis-table').innerHTML = `<table class="ledger">
-    <thead><tr><th>Kickoff</th><th>Match</th><th class="r">Line</th><th>Pick</th>
-      <th class="r">Model p(O)</th><th class="r">Book p(O)</th>
-      <th class="r">Δ pts</th><th class="r">Total</th><th>Outcome</th></tr></thead>
+  el.hidden = false;
+  const parts = [];
+  if (sup) {
+    parts.push(sup === xs.length
+      ? `Every row in scope is a <b>no-pick</b> — suppressed by the gate and
+         never bet. These rates are counterfactual: what would have happened
+         had the gate been open.`
+      : `${sup} of ${xs.length} rows in scope are <b>no-picks</b> that were
+         never bet. Their contribution to these rates is counterfactual — use
+         the <b>Picked vs suppressed</b> breakdown to keep the two apart.`);
+  }
+  if (sched) {
+    parts.push(`${sched === xs.length
+      ? 'Every row in scope is'
+      : `${sched} of ${xs.length} rows in scope are`} <b>model-only</b> —
+       league-schedule games the book never priced. Their wins are
+       informational, not bettable, and the two populations are calibrated
+       separately (never pool their rates).`);
+  }
+  el.innerHTML = parts.join(' ');
+}
+
+function renderPerfTiles(xs) {
+  const g = graded(xs);
+  const rate = hitRate(g);
+  const conf = xs.length
+    ? xs.reduce((a, r) => a + (r.confidence ?? 0), 0) / xs.length : null;
+  const over = xs.length
+    ? xs.filter((r) => r.model_side === 'over').length / xs.length : null;
+  const tiles = [
+    ['EVENTS', xs.length, ''],
+    ['GRADABLE', g.length, ''],
+    ['MODEL SIDE HIT', rate != null ? pct(rate) : '—', 'accent'],
+    ['MODEL BRIER', brierOf(g)?.toFixed(4) ?? '—', ''],
+    ['AVG CONFIDENCE', conf != null ? pct(conf) : '—', ''],
+    ['LEANED OVER', over != null ? pct(over, 0) : '—', ''],
+  ];
+  $('perf-tiles').innerHTML = tiles.map(([k, v, cls]) =>
+    `<div class="tile ${cls}"><div class="v num">${v}</div>
+     <div class="k">${k}</div></div>`).join('');
+}
+
+/* One renderer for all the breakdowns: bucket the rows, show gradable count
+   and hit rate, bar coloured against the 50% coin-flip line. `correctOf`
+   picks the grade column — totals use model_side_correct, 1x2 side_correct. */
+function renderBreakdown(hostId, head, buckets, empty,
+                         correctOf = (r) => r.model_side_correct) {
+  const rows = buckets.filter(([, xs]) => xs.length).map(([label, xs]) => {
+    const g = xs.filter((r) => correctOf(r) != null);
+    const rate = g.length
+      ? g.reduce((a, r) => a + correctOf(r), 0) / g.length : null;
+    return `<tr><td style="text-transform:capitalize;">${esc(label)}</td>
+      <td class="num r">${g.length}</td>
+      <td class="num r">${rate != null ? pct(rate) : '—'}</td>
+      <td style="width:34%;"><div class="minibar">
+        <span style="width:${(rate ?? 0) * 100}%;
+          background:${(rate ?? 0) >= 0.5 ? 'var(--good)' : 'var(--bad)'};">
+        </span></div></td></tr>`;
+  }).join('');
+  $(hostId).innerHTML = rows
+    ? `<table class="ledger"><thead><tr><th>${head}</th>
+         <th class="r">N</th><th class="r">Hit</th><th></th></tr></thead>
+       <tbody>${rows}</tbody></table>`
+    : `<div class="empty">${empty}</div>`;
+}
+
+function renderPerfBreakdowns(xs) {
+  renderBreakdown('perf-pop-table', 'Population', [
+    ['model-only', xs.filter((r) => r.population === 'schedule')],
+    ['book-priced', xs.filter((r) => r.population === 'priced')],
+  ], 'nothing in scope.');
+
+  renderBreakdown('perf-gate-table', 'Gate', [
+    ['picked', xs.filter(isPick)],
+    ['suppressed', xs.filter((r) => !isPick(r))],
+  ], 'nothing in scope.');
+
+  const lines = [...new Set(xs.map((r) => r.line))].sort((a, b) => a - b);
+  renderBreakdown('perf-line-table', 'Line',
+    lines.map((l) => [String(l), xs.filter((r) => r.line === l)]),
+    'nothing in scope.');
+
+  renderBreakdown('perf-lean-table', 'Lean', [
+    ['over', xs.filter((r) => r.model_side === 'over')],
+    ['under', xs.filter((r) => r.model_side === 'under')],
+  ], 'nothing in scope.');
+}
+
+/* This chart follows the filters — slicing by line, lean or gate and
+   watching the series move IS the tool. */
+function perfDaily(xs) {
+  const byDay = new Map();
+  for (const r of graded(xs)) {
+    const d = localDay(r.kickoff);
+    const e = byDay.get(d) ?? { graded: 0, hits: 0 };
+    e.graded += 1;
+    e.hits += r.model_side_correct;
+    byDay.set(d, e);
+  }
+  return [...byDay.entries()].sort(([a], [b]) => a.localeCompare(b))
+    .map(([date, e]) => ({ date, graded: e.graded, hits: e.hits,
+                           hit_rate: e.hits / e.graded }));
+}
+
+/* ---- sortable "Every settled event" table ----
+   Accessors return the sortable value; null means "no value" and sorts last
+   in BOTH directions (a missing book price is not a small edge). */
+const PERF_SORT_KEYS = {
+  kickoff: (r) => r.kickoff,
+  match: (r) => (r.home_player ?? r.home_club ?? '').toLowerCase(),
+  line: (r) => r.line,
+  lean: (r) => r.model_side,
+  conf: (r) => r.confidence,
+  model: (r) => r.model_p_over,
+  book: (r) => r.book_p_over,
+  edge: (r) => r.book_p_over == null ? null : r.model_p_over - r.book_p_over,
+  total: (r) => r.result_total,
+  outcome: (r) => outcomeOf(r),
+};
+
+function sortRows(xs, { key, dir }, keys) {
+  const acc = keys[key] ?? keys.kickoff;
+  const sign = dir === 'asc' ? 1 : -1;
+  return [...xs].sort((a, b) => {
+    const va = acc(a), vb = acc(b);
+    if (va == null && vb == null) return 0;
+    if (va == null) return 1;
+    if (vb == null) return -1;
+    return va < vb ? -sign : va > vb ? sign : 0;
+  });
+}
+
+const perfSorted = (xs) => sortRows(xs, perf.sort, PERF_SORT_KEYS);
+
+// delegation: tables are rebuilt on every render, their containers are not
+function wireSort(hostId, sort, rerender) {
+  $(hostId).addEventListener('click', (ev) => {
+    const th = ev.target.closest('th[data-key]');
+    if (!th) return;
+    const key = th.dataset.key;
+    if (sort.key === key) {
+      sort.dir = sort.dir === 'asc' ? 'desc' : 'asc';
+    } else {
+      // fresh column: newest-first for time, ascending for everything else
+      sort.key = key;
+      sort.dir = key === 'kickoff' ? 'desc' : 'asc';
+    }
+    rerender();
+  });
+}
+
+const thBuilder = (sort) => (key, label, right = false) => {
+  const active = sort.key === key;
+  const arrow = active ? (sort.dir === 'asc' ? ' ▲' : ' ▼') : '';
+  return `<th class="${right ? 'r ' : ''}sortable${active ? ' sorted' : ''}"
+    data-key="${key}" title="sort by ${label}">${label}${arrow}</th>`;
+};
+
+function renderPerfTable(xs) {
+  xs = perfSorted(xs);
+  const cls = { hit: 'wb-hit', miss: 'wb-miss', push: 'wb-push' };
+  const sym = { hit: '✓', miss: '✕', push: '—' };
+  // a suppressed row's outcome is hypothetical; a pick's is what happened
+  const label = (r, o) => isPick(r)
+    ? { hit: 'hit', miss: 'miss', push: 'push' }[o]
+    : { hit: 'would hit', miss: 'would miss', push: 'would push' }[o];
+  // the settlement join is LEFT, so a score can be absent even with a total
+  const score = (r) => r.home_ft == null || r.away_ft == null
+    ? '<span style="color:var(--ink3);">—</span>'
+    : `${r.home_ft}–${r.away_ft}`;
+  const rows = xs.map((r) => {
+    const o = outcomeOf(r);
+    const edge = r.book_p_over != null ? r.model_p_over - r.book_p_over : null;
+    return `<tr>
+      <td class="num" style="white-space:nowrap;color:var(--ink2);">
+        ${localDHM(r.kickoff)}</td>
+      <td style="font-weight:600;">${r.population === 'schedule'
+        ? '<span title="model-only · league schedule, no book price" style="color:var(--ink3);">◌ </span>'
+        : ''}${esc(r.home_player ?? r.home_club)}
+        <span style="color:var(--ink3);">v</span>
+        ${esc(r.away_player ?? r.away_club)}</td>
+      <td class="num r">${r.line}</td>
+      <td>${isPick(r)
+        ? `${esc(r.model_side)}${r.tier
+            ? ` <span class="tier ${r.tier}">${r.tier}</span>` : ''}`
+        : `<span class="lean" title="below the pick gate — never bet"
+             >${esc(r.model_side)}</span>`}</td>
+      <td class="num r">${pct(r.confidence)}</td>
+      <td class="num r">${pct(r.model_p_over)}</td>
+      <td class="num r">${pct(r.book_p_over)}</td>
+      <td class="num r" style="color:${edge == null ? 'var(--ink3)'
+        : edge >= 0 ? 'var(--good)' : 'var(--bad)'};">
+        ${edge == null ? '—' : (edge * 100).toFixed(1)}</td>
+      <td class="num r" style="white-space:nowrap;">${score(r)}</td>
+      <td class="num r" style="font-weight:700;">${r.result_total}</td>
+      <td class="${cls[o]}" style="white-space:nowrap;">${sym[o]} ${label(r, o)}</td>
+    </tr>`;
+  }).join('');
+  const th = thBuilder(perf.sort);
+  $('perf-table').innerHTML = `<table class="ledger">
+    <thead><tr>${th('kickoff', 'Kickoff')}${th('match', 'Match')}
+      ${th('line', 'Line', true)}${th('lean', 'Leaned')}
+      ${th('conf', 'Conf', true)}${th('model', 'Model p(O)', true)}
+      ${th('book', 'Book p(O)', true)}${th('edge', 'Δ pts', true)}
+      <th class="r">Score</th>${th('total', 'Total', true)}
+      ${th('outcome', 'Outcome')}</tr></thead>
     <tbody>${rows}</tbody></table>`;
 }
 
-async function loadAnalysis() {
-  renderRangeChips();
-  $('chart-card').classList.add('loading'); // hold frame, no skeleton flash
-  try {
-    analysis.data = await getJSON(`/api/analysis?days=${analysis.days}`);
-    renderHitrateChart();
-    renderAnalysisTable();
-  } finally {
-    $('chart-card').classList.remove('loading');
+function renderPerf() {
+  const all = perfRows();
+  const xs = all.filter(perfMatches);
+  const pushes = xs.length - graded(xs).length;
+  const picks = xs.filter(isPick).length;
+  $('perf-table-meta').textContent =
+    (perfFiltersActive()
+      ? `${xs.length} of ${all.length} settled events shown`
+      : `${all.length} settled events in window`)
+    + ` · ${picks} picked, ${xs.length - picks} suppressed`
+    + (pushes ? ` · ${pushes} ungradable (push)` : '')
+    + ' · click a column header to sort';
+
+  renderPerfCaveat(xs);
+  renderPerfTiles(xs);
+  renderPerfBreakdowns(xs);
+  renderRateChart({
+    hostId: 'perf-chart', ttId: 'perf-chart-tt', cardId: 'perf-chart-card',
+    daily: perfDaily(xs),
+    rateLabel: 'DAILY HIT RATE % · MODEL SIDE', noun: 'gradable events',
+    empty: `not enough graded days yet — the chart appears once two or more
+      kickoff days have gradable rows.`,
+  });
+
+  if (xs.length) {
+    renderPerfTable(xs);
+  } else {
+    $('perf-table').innerHTML = all.length
+      ? '<div class="empty">no settled events match these filters.</div>'
+      : '<div class="empty">no settled events in this window yet.</div>';
+  }
+  renderX12Perf();
+}
+
+function syncPerfChrome() {
+  for (const [key, id] of Object.entries(P_FILTER_IDS)) {
+    const el = $(id);
+    const on = key === 'match' ? !!perf.filters.match.trim()
+      : perf.filters[key] !== 'all';
+    el.classList.toggle('on', on);
+  }
+  $('p-reset').hidden = !perfFiltersActive();
+}
+
+function syncPerfLineOptions() {
+  const lines = [...new Set(perfRows().map((r) => r.line))].sort((a, b) => a - b);
+  if (perf.filters.line !== 'all'
+      && !lines.some((l) => String(l) === perf.filters.line)) {
+    perf.filters.line = 'all';
+  }
+  const sel = $('p-line');
+  sel.replaceChildren();
+  sel.add(new Option('All lines', 'all'));
+  for (const l of lines) sel.add(new Option(`Line ${l}`, String(l)));
+  sel.value = perf.filters.line;
+}
+
+function renderPerfRangeChips() {
+  // both markets share one window; the chips render into whichever block is
+  // visible (and both, so the state survives a mode switch)
+  const html = RANGES.map(([d, label]) =>
+    `<button class="pill ${perf.days === d ? 'active' : ''}" data-d="${d}">
+       ${label}</button>`).join('');
+  for (const id of ['perf-range', 'x12-range']) {
+    $(id).innerHTML = html;
+    for (const b of $(id).querySelectorAll('button')) {
+      b.onclick = () => { perf.days = Number(b.dataset.d); void loadPerf(); };
+    }
   }
 }
 
+function wirePerfFilters() {
+  for (const [key, id] of Object.entries(P_FILTER_IDS)) {
+    $(id).addEventListener('input', (ev) => {
+      perf.filters[key] = ev.target.value;
+      syncPerfChrome();
+      renderPerf();
+    });
+  }
+  $('p-reset').onclick = () => {
+    perf.filters = { match: '', population: 'all', gate: 'all', line: 'all',
+                     side: 'all', outcome: 'all' };
+    for (const [key, id] of Object.entries(P_FILTER_IDS)) {
+      $(id).value = key === 'match' ? '' : 'all';
+    }
+    syncPerfChrome();
+    renderPerf();
+  };
+}
+
+async function loadPerf() {
+  renderPerfRangeChips();
+  $('perf-chart-card').classList.add('loading');
+  try {
+    perf.data = await getJSON(`/api/analysis?days=${perf.days}`);
+    syncPerfLineOptions();
+    syncX12ClubOptions();
+    syncPerfChrome();
+    syncX12Chrome();
+    renderPerf();
+  } finally {
+    $('perf-chart-card').classList.remove('loading');
+  }
+}
+
+/* ---------- 1x2 on the performance tab (docs/X12_UI.md Phase 3) ----------
+
+   Same symmetry as the totals view above: every x12-settled event, graded on
+   the model's top outcome whether or not it cleared the 0.50 pick gate —
+   side_correct is the shadow grade and never feeds the Ledger scorecard.
+   A 3-way market has no pushes, so every settled row grades. Data rides in
+   on /api/analysis (perf.data.x12) and follows the shared range chips. */
+
+const X12_OUTCOMES = ['home', 'draw', 'away'];
+const x12perf = { sort: { key: 'kickoff', dir: 'desc' },
+                  filters: { match: '', club: 'all', population: 'all',
+                             gate: 'all', side: 'all', outcome: 'all' } };
+const X_FILTER_IDS = { match: 'x-match', club: 'x-club', population: 'x-pop',
+                       gate: 'x-gate', side: 'x-side', outcome: 'x-outcome' };
+
+const x12PerfRows = () => perf.data?.x12 ?? [];
+const x12TopP = (r) => Math.max(r.p_home, r.p_draw, r.p_away);
+const x12BookP = (r) => r[`book_p_${r.side}`];
+
+/* Filters scope the whole section — tiles, breakdowns, chart and table all
+   read the same filtered frame, like the totals view above. `side` is the
+   model's read (its top outcome), picked or not. */
+function x12Matches(r) {
+  const f = x12perf.filters;
+  if (f.population !== 'all' && r.population !== f.population) return false;
+  if (f.gate === 'picks' && r.pick == null) return false;
+  if (f.gate === 'nopicks' && r.pick != null) return false;
+  if (f.side !== 'all' && r.side !== f.side) return false;
+  if (f.outcome !== 'all'
+      && (r.side_correct ? 'hit' : 'miss') !== f.outcome) return false;
+  if (f.club !== 'all' && r.home_club !== f.club && r.away_club !== f.club) {
+    return false;
+  }
+  const q = f.match.trim().toLowerCase();
+  if (q) {
+    const hay = [r.home_player, r.away_player, r.home_club, r.away_club]
+      .filter(Boolean).join(' ').toLowerCase();
+    if (!hay.includes(q)) return false;
+  }
+  return true;
+}
+
+function x12FiltersActive() {
+  const f = x12perf.filters;
+  return !!f.match.trim() || f.club !== 'all' || f.population !== 'all'
+    || f.gate !== 'all' || f.side !== 'all' || f.outcome !== 'all';
+}
+
+function syncX12Chrome() {
+  for (const [key, id] of Object.entries(X_FILTER_IDS)) {
+    const on = key === 'match' ? !!x12perf.filters.match.trim()
+      : x12perf.filters[key] !== 'all';
+    $(id).classList.toggle('on', on);
+  }
+  $('x-reset').hidden = !x12FiltersActive();
+}
+
+/* The team dropdown lists whatever clubs appear in the loaded window, so a
+   newly aliased club shows up as soon as it has a settled 1x2 row. Same
+   clamp-then-rebuild shape as syncPerfLineOptions. */
+function syncX12ClubOptions() {
+  const clubs = [...new Set(x12PerfRows()
+    .flatMap((r) => [r.home_club, r.away_club]).filter(Boolean))]
+    .sort((a, b) => a.localeCompare(b));
+  if (x12perf.filters.club !== 'all'
+      && !clubs.includes(x12perf.filters.club)) {
+    x12perf.filters.club = 'all';
+  }
+  const sel = $('x-club');
+  sel.replaceChildren();
+  sel.add(new Option('All teams', 'all'));
+  for (const c of clubs) sel.add(new Option(c, c));
+  sel.value = x12perf.filters.club;
+}
+
+function wireX12Filters() {
+  for (const [key, id] of Object.entries(X_FILTER_IDS)) {
+    $(id).addEventListener('input', (ev) => {
+      x12perf.filters[key] = ev.target.value;
+      syncX12Chrome();
+      renderX12Perf();
+    });
+  }
+  $('x-reset').onclick = () => {
+    x12perf.filters = { match: '', club: 'all', population: 'all',
+                        gate: 'all', side: 'all', outcome: 'all' };
+    for (const [key, id] of Object.entries(X_FILTER_IDS)) {
+      $(id).value = key === 'match' ? '' : 'all';
+    }
+    syncX12Chrome();
+    renderX12Perf();
+  };
+}
+
+function renderX12Caveat(xs) {
+  const el = $('x12-caveat');
+  const sup = xs.filter((r) => r.pick == null).length;
+  const sched = xs.filter((r) => r.population === 'schedule').length;
+  if (!sup && !sched) {
+    el.hidden = true;
+    return;
+  }
+  el.hidden = false;
+  const parts = [];
+  if (sup) {
+    parts.push(sup === xs.length
+      ? `Every row in scope is a <b>no-pick</b> — suppressed by the 0.50 gate
+         and never bet. These rates are counterfactual: what would have
+         happened had the gate been open.`
+      : `${sup} of ${xs.length} rows in scope are <b>no-picks</b> that were
+         never bet — their contribution to these rates is counterfactual. Use
+         the <b>Picked vs suppressed</b> breakdown to keep the two apart.`);
+  }
+  if (sched) {
+    parts.push(`${sched === xs.length
+      ? 'Every row in scope is'
+      : `${sched} of ${xs.length} rows in scope are`} <b>model-only</b> —
+       league-schedule games the book never priced. Their wins are
+       informational, not bettable, and the populations are never pooled.`);
+  }
+  el.innerHTML = parts.join(' ');
+}
+
+function renderX12Tiles(xs) {
+  const picks = xs.filter((r) => r.pick != null);
+  const pickHits = picks.filter((r) => r.outcome === 'correct');
+  const rate = xs.length
+    ? xs.reduce((a, r) => a + r.side_correct, 0) / xs.length : null;
+  const conf = xs.length
+    ? xs.reduce((a, r) => a + x12TopP(r), 0) / xs.length : null;
+  const regen = xs.filter((r) => r.regen_agrees != null);
+  $('x12-tiles').innerHTML = tilesHtml([
+    ['EVENTS', xs.length, ''],
+    ['PICKED', picks.length, ''],
+    ['PICK HIT', picks.length ? pct(pickHits.length / picks.length) : '—',
+      'accent'],
+    ['TOP-OUTCOME HIT', rate != null ? pct(rate) : '—', ''],
+    ['AVG TOP PROB', conf != null ? pct(conf) : '—', ''],
+    // denominator is picked rows only — tiny early samples must say so
+    [`REGEN AGREE · ${regen.length} PICK${regen.length === 1 ? '' : 'S'}`,
+      regen.length
+        ? pct(regen.reduce((a, r) => a + r.regen_agrees, 0) / regen.length, 0)
+        : '—', ''],
+  ]);
+}
+
+function renderX12Breakdowns(xs) {
+  const c = (r) => r.side_correct;
+  renderBreakdown('x12-pop-table', 'Population', [
+    ['model-only', xs.filter((r) => r.population === 'schedule')],
+    ['book-priced', xs.filter((r) => r.population === 'priced')],
+  ], 'nothing settled yet.', c);
+
+  renderBreakdown('x12-gate-table', 'Gate', [
+    ['picked', xs.filter((r) => r.pick != null)],
+    ['suppressed', xs.filter((r) => r.pick == null)],
+  ], 'nothing settled yet.', c);
+
+  renderBreakdown('x12-side-table', 'Top outcome',
+    X12_OUTCOMES.map((s) => [s, xs.filter((r) => r.side === s)]),
+    'nothing settled yet.', c);
+
+  renderBreakdown('x12-result-table', 'Result',
+    X12_OUTCOMES.map((s) => [s, xs.filter((r) => r.result === s)]),
+    'nothing settled yet.', c);
+}
+
+const X12_SORT_KEYS = {
+  kickoff: (r) => r.kickoff,
+  match: (r) => (r.home_player ?? r.home_club ?? '').toLowerCase(),
+  side: (r) => r.side,
+  conf: (r) => x12TopP(r),
+  model: (r) => x12TopP(r),
+  book: (r) => x12BookP(r),
+  edge: (r) => x12BookP(r) == null ? null : x12TopP(r) - x12BookP(r),
+  result: (r) => r.result,
+  outcome: (r) => r.side_correct,
+};
+
+function renderX12Table(xs) {
+  xs = sortRows(xs, x12perf.sort, X12_SORT_KEYS);
+  // a suppressed row's outcome is hypothetical; a pick's is what happened
+  const label = (r) => r.pick != null
+    ? (r.side_correct ? 'hit' : 'miss')
+    : (r.side_correct ? 'would hit' : 'would miss');
+  const score = (r) => r.home_ft == null || r.away_ft == null
+    ? '<span style="color:var(--ink3);">—</span>'
+    : `${r.home_ft}–${r.away_ft}`;
+  const hda = (r) => [r.p_home, r.p_draw, r.p_away]
+    .map((p) => Math.round(p * 100)).join(' / ');
+  // player leads (it's the sort key); the club tags along muted so newly
+  // aliased teams are visible without widening the column for club-only rows
+  const team = (player, club) => player == null ? esc(club ?? '—')
+    : club == null ? esc(player)
+    : `${esc(player)} <span style="color:var(--ink3);font-weight:400;"
+         >· ${esc(club)}</span>`;
+  const rows = xs.map((r) => {
+    const edge = x12BookP(r) != null ? x12TopP(r) - x12BookP(r) : null;
+    return `<tr>
+      <td class="num" style="white-space:nowrap;color:var(--ink2);">
+        ${localDHM(r.kickoff)}</td>
+      <td style="font-weight:600;">${r.population === 'schedule'
+        ? '<span title="model-only · league schedule, no book price" style="color:var(--ink3);">◌ </span>'
+        : ''}${team(r.home_player, r.home_club)}
+        <span style="color:var(--ink3);">v</span>
+        ${team(r.away_player, r.away_club)}</td>
+      <td>${r.pick != null
+        ? esc(r.side)
+        : `<span class="lean" title="below the 0.50 pick gate — never bet"
+             >${esc(r.side)}</span>`}</td>
+      <td class="num r">${pct(x12TopP(r))}</td>
+      <td class="num r" title="model home / draw / away">${hda(r)}</td>
+      <td class="num r">${pct(x12BookP(r))}</td>
+      <td class="num r" style="color:${edge == null ? 'var(--ink3)'
+        : edge >= 0 ? 'var(--good)' : 'var(--bad)'};">
+        ${edge == null ? '—' : (edge * 100).toFixed(1)}</td>
+      <td class="num r" style="white-space:nowrap;">${score(r)}</td>
+      <td class="num r" style="font-weight:700;">${esc(r.result)}</td>
+      <td class="${r.side_correct ? 'wb-hit' : 'wb-miss'}"
+        style="white-space:nowrap;">${r.side_correct ? '✓' : '✕'} ${label(r)}</td>
+    </tr>`;
+  }).join('');
+  const th = thBuilder(x12perf.sort);
+  $('x12-table').innerHTML = `<table class="ledger">
+    <thead><tr>${th('kickoff', 'Kickoff')}${th('match', 'Match')}
+      ${th('side', 'Read')}${th('conf', 'Model conf', true)}
+      ${th('model', 'Model H/D/A', true)}${th('book', 'Book p(read)', true)}
+      ${th('edge', 'Δ pts', true)}<th class="r">Score</th>
+      ${th('result', 'Result', true)}${th('outcome', 'Outcome')}</tr></thead>
+    <tbody>${rows}</tbody></table>`;
+}
+
+function x12Daily(xs) {
+  const byDay = new Map();
+  for (const r of xs) {
+    const d = localDay(r.kickoff);
+    const e = byDay.get(d) ?? { graded: 0, hits: 0 };
+    e.graded += 1;
+    e.hits += r.side_correct;
+    byDay.set(d, e);
+  }
+  return [...byDay.entries()].sort(([a], [b]) => a.localeCompare(b))
+    .map(([date, e]) => ({ date, graded: e.graded, hits: e.hits,
+                           hit_rate: e.hits / e.graded }));
+}
+
+function renderX12Perf() {
+  // the toggle SWITCHES the market view: O/U block xor 1x2 block
+  $('ou-perf').hidden = state.x12;
+  $('x12-perf').hidden = !state.x12;
+  if (!state.x12 || !perf.data) return;
+  const all = x12PerfRows();
+  const xs = all.filter(x12Matches);
+  const picks = xs.filter((r) => r.pick != null).length;
+  $('x12-table-meta').textContent =
+    (x12FiltersActive()
+      ? `${xs.length} of ${all.length} settled events shown`
+      : `${all.length} settled events in window`)
+    + ` · ${picks} picked, ${xs.length - picks} suppressed`
+    + ' · click a column header to sort';
+
+  renderX12Caveat(xs);
+  renderX12Tiles(xs);
+  renderX12Breakdowns(xs);
+  renderRateChart({
+    hostId: 'x12-chart', ttId: 'x12-chart-tt', cardId: 'x12-chart-card',
+    daily: x12Daily(xs),
+    rateLabel: 'DAILY HIT RATE % · TOP OUTCOME', noun: 'settled events',
+    empty: `not enough settled days yet — the chart appears once two or more
+      kickoff days have settled 1x2 rows.`,
+  });
+  if (!xs.length) {
+    $('x12-table').innerHTML = all.length
+      ? '<div class="empty">no settled 1x2 events match these filters.</div>'
+      : '<div class="empty">nothing settled for 1x2 in this window yet.</div>';
+    return;
+  }
+  renderX12Table(xs);
+}
+
+/* ---------- trajectory tab (docs: vs-book "lambda dynamic range") ----------
+
+   Daily series of the λ slope + upcoming checkpoints. The slope is
+   market-agnostic — O/U and 1x2 read the same served λs — so this page
+   ignores the 1X2 toggle. It's the quick read (analytic ±95% band, no
+   bootstrap); `settlement.settle vs-book` stays the careful number. */
+
+const traj = { data: null };
+
+const fmtSlope = (v) =>
+  v ? `${v.slope.toFixed(3)} ±${(1.96 * v.se).toFixed(2)}` : '—';
+
+async function loadTrajectory() {
+  $('traj-chart-card').classList.add('loading');
+  try {
+    traj.data = await getJSON('/api/trajectory?days=30');
+    renderTrajectory();
+  } finally {
+    $('traj-chart-card').classList.remove('loading');
+  }
+}
+
+function renderTrajectory() {
+  if (!traj.data) return;
+  const series = traj.data.series;
+  const latest = [...series].reverse().find((d) => d.priced || d.schedule);
+  $('traj-meta').textContent = latest
+    ? `latest (${latest.date}) · book-priced ${fmtSlope(latest.priced)}`
+      + ` · model-only ${fmtSlope(latest.schedule)}`
+    : '';
+  renderSlopeChart({ hostId: 'traj-chart', ttId: 'traj-chart-tt',
+                     cardId: 'traj-chart-card', series });
+  renderMilestones();
+}
+
+// contiguous non-null stretches of one population, so lines break honestly
+// across thin days instead of bridging them
+function slopeRuns(series, key) {
+  const out = []; let cur = [];
+  series.forEach((d, i) => {
+    if (d[key]) cur.push({ d, i });
+    else if (cur.length) { out.push(cur); cur = []; }
+  });
+  if (cur.length) out.push(cur);
+  return out;
+}
+
+function slopeTicks(lo, hi, m = 5) {
+  const span = hi - lo, raw = span / (m - 1);
+  const mag = 10 ** Math.floor(Math.log10(raw));
+  const step = [1, 2, 2.5, 5, 10].map((k) => k * mag)
+    .find((st) => span / st <= m) ?? 10 * mag;
+  const out = [];
+  for (let v = Math.ceil(lo / step) * step; v <= hi + 1e-9; v += step)
+    out.push(Math.round(v * 1000) / 1000);
+  return out;
+}
+
+function renderSlopeChart({ hostId, ttId, cardId, series }) {
+  const host = $(hostId);
+  if (series.filter((d) => d.priced || d.schedule).length < 2) {
+    host.innerHTML = `<div class="empty">not enough settled days yet — a point
+      appears once a population's 7-day window holds
+      ${traj.data?.min_n ?? 25}+ settled events.</div>`;
+    return;
+  }
+  // R leaves room for the endpoint value labels
+  const W = 1000, H = 340, L = 46, R = 56, T = 26, B = 300, xLabY = 330;
+  const n = series.length;
+  const x = (i) => L + (i + 0.5) * ((W - L - R) / n);
+  // y domain spans both series' bands and always includes calibrated 1.0
+  let lo = 1, hi = 1;
+  for (const d of series) for (const k of ['priced', 'schedule']) {
+    const v = d[k];
+    if (v) {
+      lo = Math.min(lo, v.slope - 1.96 * v.se);
+      hi = Math.max(hi, v.slope + 1.96 * v.se);
+    }
+  }
+  const pad = (hi - lo) * 0.08 || 0.1;
+  lo -= pad; hi += pad;
+  const y = (v) => B - ((v - lo) / (hi - lo)) * (B - T);
+
+  let s = '';
+  for (const g of slopeTicks(lo, hi)) {
+    s += `<line x1="${L}" x2="${W - R}" y1="${y(g)}" y2="${y(g)}"
+           stroke="var(--line)" stroke-width="1"/>
+          <text x="${L - 8}" y="${y(g) + 4}" text-anchor="end" font-size="11"
+           fill="var(--ink3)" style="font-variant-numeric:tabular-nums;">${g}</text>`;
+  }
+  s += `<line x1="${L}" x2="${W - R}" y1="${y(1)}" y2="${y(1)}"
+         stroke="var(--ink)" stroke-width="1" stroke-dasharray="5 4"/>
+        <text x="${W - R}" y="${y(1) - 6}" text-anchor="end" font-size="10.5"
+         fill="var(--ink2)" letter-spacing="1.5">1.0 · CALIBRATED</text>
+        <text x="${L}" y="14" font-size="10.5" fill="var(--ink2)"
+         letter-spacing="1.5">SLOPE · REALIZED TOTAL ~ λ-TOTAL · ROLLING 7D ±95%</text>`;
+
+  for (const [key, color] of [['schedule', 'var(--ink2)'],
+                              ['priced', 'var(--accent)']]) {
+    for (const run of slopeRuns(series, key)) {
+      const band = [
+        ...run.map(({ d, i }) =>
+          `${x(i)},${y(d[key].slope + 1.96 * d[key].se)}`),
+        ...[...run].reverse().map(({ d, i }) =>
+          `${x(i)},${y(d[key].slope - 1.96 * d[key].se)}`),
+      ];
+      s += `<polygon points="${band.join(' ')}" fill="${color}" opacity="0.1"/>`;
+      s += `<polyline points="${run.map(({ d, i }) =>
+             `${x(i)},${y(d[key].slope)}`).join(' ')}" fill="none"
+             stroke="${color}" stroke-width="2" stroke-linejoin="round"
+             stroke-linecap="round"/>`;
+      for (const { d, i } of run) {
+        s += `<circle cx="${x(i)}" cy="${y(d[key].slope)}" r="3.5"
+               fill="${color}" stroke="var(--surface)" stroke-width="2"/>`;
+      }
+      const last = run[run.length - 1];
+      if (last.i === n - 1) {
+        s += `<text x="${x(last.i) + 9}" y="${y(last.d[key].slope) + 4}"
+               font-size="12.5" font-weight="700" fill="var(--ink)"
+               style="font-variant-numeric:tabular-nums;"
+              >${last.d[key].slope.toFixed(2)}</text>`;
+      }
+    }
+  }
+  const step = Math.max(1, Math.ceil(n / 8));
+  for (let i = 0; i < n; i += step) {
+    s += `<text x="${x(i)}" y="${xLabY}" text-anchor="middle" font-size="11"
+           fill="var(--ink3)">${series[i].date.slice(5)}</text>`;
+  }
+  s += `<line id="xhair" x1="0" x2="0" y1="${T}" y2="${B}"
+         stroke="var(--ink3)" stroke-width="1" visibility="hidden"/>`;
+
+  host.innerHTML = `<svg viewBox="0 0 ${W} ${H}" role="img"
+    aria-label="Rolling 7-day lambda slope by population">${s}</svg>`;
+
+  const svg = host.querySelector('svg');
+  const xhair = svg.querySelector('#xhair');
+  const tt = $(ttId);
+  const show = (i, clientX, clientY) => {
+    xhair.setAttribute('x1', x(i)); xhair.setAttribute('x2', x(i));
+    xhair.setAttribute('visibility', 'visible');
+    const d = series[i];
+    tt.replaceChildren();
+    const date = document.createElement('div');
+    date.className = 'tt-date'; date.textContent = d.date;
+    tt.appendChild(date);
+    const row = (key, val, lbl) => {
+      const r = document.createElement('div'); r.className = 'tt-row';
+      const k = document.createElement('span'); k.className = `tt-key ${key}`;
+      const v = document.createElement('span'); v.className = 'tt-val';
+      v.textContent = val;
+      const l = document.createElement('span'); l.className = 'tt-lbl';
+      l.textContent = lbl;
+      r.append(k, v, l); tt.appendChild(r);
+    };
+    row('', fmtSlope(d.priced),
+        d.priced ? `book-priced · n=${d.priced.n}` : 'book-priced · thin');
+    row('vol', fmtSlope(d.schedule),
+        d.schedule ? `model-only · n=${d.schedule.n}` : 'model-only · thin');
+    tt.style.display = 'block';
+    const card = $(cardId).getBoundingClientRect();
+    const ttW = tt.offsetWidth;
+    let px = clientX - card.left + 14;
+    if (px + ttW > card.width - 8) px = clientX - card.left - ttW - 14;
+    tt.style.left = `${px}px`;
+    tt.style.top = `${Math.max(8, clientY - card.top - 20)}px`;
+  };
+  svg.addEventListener('pointermove', (ev) => {
+    const box = svg.getBoundingClientRect();
+    const mx = ((ev.clientX - box.left) / box.width) * W;
+    const i = Math.min(n - 1, Math.max(0,
+      Math.round((mx - L) / ((W - L - R) / n) - 0.5)));
+    show(i, ev.clientX, ev.clientY);
+  });
+  svg.addEventListener('pointerleave', () => {
+    xhair.setAttribute('visibility', 'hidden');
+    tt.style.display = 'none';
+  });
+}
+
+/* Date-gated milestones count down to a calendar date; data-gated ones fill
+   on graded model-only 1x2 picks (the population that matches the
+   walk-forward frame) and pace their ETA off recent accrual. */
+const MILESTONES = [
+  { title: 'Slope baseline read', due: '2026-07-18',
+    note: `The vs-book 7-day window is fully post-club/TOD from this day.
+      Record where the slope settles as the new baseline — judge residual
+      shrinkage above 1.0 only after this, not during the mixed window.` },
+  { title: 'Population-split verification gate', due: '2026-07-18',
+    note: `One full week of re-banded tiers (TIER_STRONG 0.69) and gtl
+      settlement. Re-check per-population hit rates before trusting tier
+      labels again (docs/POPULATION_SPLIT.md).` },
+  { title: '1x2 · first honest read vs the 59% gate', target: 370,
+    pop: 'schedule',
+    note: `Graded model-only 1x2 picks for a ±5-point read against the
+      walk-forward 59.1%. Also watch the live pick rate — it is running
+      above the walk-forward's 11%.` },
+  { title: '1x2 · Phase 4 tier bands', target: 500, pop: 'schedule',
+    note: `Quantile 1x2 tier bands on served pick confidence (the settle
+      tiers pattern — never eval-frame quantiles), then tier chips return
+      to the 1x2 surfaces.` },
+  { title: '1x2 · tight read (±3 pts)', target: 1000, pop: 'schedule',
+    note: `Enough graded picks to tell whether the elevated live pick rate
+      costs accuracy near the 0.50 gate.` },
+  { title: 'Refresh the 1x2 walk-forward benchmark', due: '2026-08-12',
+    note: `python -m model.evaluate x12 on a month more of history —
+      re-measure the 59% target itself (recorded to model_runs).` },
+];
+
+function msView(m) {
+  if (m.due) {
+    const ms = Date.parse(`${m.due}T00:00:00Z`) - Date.now();
+    const d = Math.floor(ms / 86_400_000);
+    const h = Math.floor((ms % 86_400_000) / 3_600_000);
+    return { eta: ms / 86_400_000, due: ms <= 0, prog: null, sub: m.due,
+             when: ms <= 0 ? 'DUE' : d >= 1 ? `${d}d ${h}h` : `${h}h` };
+  }
+  const g = traj.data?.x12_graded?.[m.pop];
+  const done = g?.total ?? 0;
+  const rate = g ? Math.max(g.d3 / 3, g.d7 / 7) : 0;
+  // all graded history younger than 3 days = cold start; the pace estimate
+  // is settlement backlog, not accrual — don't project an ETA off it
+  const cold = !g || (g.d3 === g.total && g.total < 50);
+  const left = Math.max(0, m.target - done);
+  const eta = left === 0 ? 0 : !cold && rate > 0 ? left / rate : Infinity;
+  return { eta, due: left === 0, prog: Math.min(1, done / m.target),
+           sub: `${done} / ${m.target} picks`
+             + (left && eta === Infinity ? ' · pace forming' : ''),
+           when: left === 0 ? 'READY' : eta === Infinity ? '—'
+             : `~${Math.ceil(eta)}d` };
+}
+
+function renderMilestones() {
+  if (!traj.data) return;
+  const items = MILESTONES.map((m) => ({ m, v: msView(m) }))
+    .sort((a, b) => a.v.eta - b.v.eta);
+  $('milestones').innerHTML = items.map(({ m, v }) => `
+    <div class="ms">
+      <div class="when${v.due ? ' due' : ''}">${v.when}
+        <span class="sub">${esc(v.sub)}</span></div>
+      <div>
+        <h4>${esc(m.title)}</h4>
+        <p>${esc(m.note.replace(/\s+/g, ' '))}</p>
+        ${v.prog == null ? ''
+          : `<div class="bar"><i style="width:${(v.prog * 100).toFixed(1)}%"></i></div>`}
+      </div>
+    </div>`).join('');
+}
+
+// a real timer: date-gated countdowns tick while the tab is open
+setInterval(() => {
+  if (!$('view-trajectory').hidden) renderMilestones();
+}, 60_000);
+
 /* ---------- tabs ---------- */
 
+const TABS = ['ledger', 'performance', 'trajectory'];
+
 function showTab() {
-  const isAnalysis = location.hash === '#analysis';
-  $('view-ledger').hidden = isAnalysis;
-  $('view-analysis').hidden = !isAnalysis;
-  $('tab-ledger').classList.toggle('active', !isAnalysis);
-  $('tab-analysis').classList.toggle('active', isAnalysis);
-  if (isAnalysis) void loadAnalysis();
+  const hash = location.hash.slice(1);
+  const active = TABS.includes(hash) ? hash : 'ledger';
+  for (const t of TABS) {
+    $(`view-${t}`).hidden = t !== active;
+    $(`tab-${t}`).classList.toggle('active', t === active);
+  }
+  if (active === 'performance') void loadPerf();
+  if (active === 'trajectory') void loadTrajectory();
 }
 window.addEventListener('hashchange', showTab);
 
@@ -432,6 +1504,18 @@ function connectSse() {
   es.onerror = () => { es.close(); setTimeout(connectSse, 5000); };
 }
 
+function syncX12Btn() {
+  $('x12-btn').textContent = `1X2 · ${state.x12 ? 'ON' : 'OFF'}`;
+  $('x12-btn').classList.toggle('active', state.x12);
+}
+
+$('x12-btn').onclick = () => {
+  state.x12 = !state.x12;
+  localStorage.setItem('x12ui', state.x12 ? '1' : '0');
+  syncX12Btn();
+  renderSlate(); renderScorecard(); renderSettled(); renderX12Perf();
+};
+
 $('theme-btn').onclick = () => {
   const el = document.documentElement;
   const dark = el.dataset.theme === 'dark';
@@ -439,6 +1523,11 @@ $('theme-btn').onclick = () => {
   $('theme-btn').textContent = dark ? '◐ DARK' : '◑ LIGHT';
 };
 
+wirePerfFilters();
+wireX12Filters();
+wireSort('perf-table', perf.sort, renderPerf);
+wireSort('x12-table', x12perf.sort, renderX12Perf);
+syncX12Btn();
 showTab();
 void refresh();
 connectSse();

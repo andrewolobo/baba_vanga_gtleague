@@ -54,8 +54,9 @@ feed auth failure (re-capture `scraper/betpawa.curl`, refresh `.env`).
 - [x] Phase 5 — predictor service (`python -m predictor.cycle`; cold 2.7s /
       warm 0.5s; scheduler deferred — the Phase-7 Node API spawns ingest +
       cycle on its own timer in dev)
-- [x] Phase 6 — settlement & scorecard (`python -m settlement.settle run|scorecard`;
-      exact-kickoff join, leak_risk + served-vs-regen guards)
+- [x] Phase 6 — settlement & scorecard (`python -m settlement.settle run|scorecard|vs-book`;
+      exact-kickoff join, leak_risk + served-vs-regen guards; `vs-book` scores
+      served probs against the de-vigged closing price — see [commands.md](commands.md))
 - [x] Phase 7 (first iteration) — Node API + web UI: `cd services/api && npm run dev`
       → http://localhost:8787 (read-only API over SQLite via node:sqlite, SSE push,
       embedded dev scheduler spawning the Python CLIs; static broadsheet UI in

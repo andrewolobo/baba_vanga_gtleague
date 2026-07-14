@@ -1,4 +1,4 @@
-# Commands
+Commands
 
 All commands run from the repo root unless noted. Python commands use the
 project venv (`.venv`). Data lives in `data/gtleague.db` (SQLite).
@@ -65,6 +65,51 @@ Settle finished fixtures and show the rolling scorecard:
 .venv/Scripts/python -m settlement.settle scorecard --days 7
 ```
 
+## Model vs the book
+
+Scores every settled prediction — including the o-vigged Over
+price before kickoff. The feed ships margin-free probabilities, so this is the
+book at its strongest, not the book plus its margin.
+
+```shell
+.venv/Scripts/python -m settlement.settle vs-book --days 7
+.venv/Scripts/python -m settlement.settle vs-book --days 30 --boot 500
+```
+
+`--boot` sets the bootstrap resamples behind every confidence interval
+(default 2000; lower it for a faster answer, raise it for stabler tails).
+`--seed` makes a run reproducible.
+
+Rows are excluded when they are leak-flagged, when the result pushed on an
+integer line, or when the model had no coverage of a player — those served the
+book's own price back, and scoring them against the book scores the book
+against itself.
+
+**How to read it.** The book sets each line so the market sits near a coin
+flip, which pins model and book Brier to nearly the same number no matter what
+either one knows; the printed `constant 0.500` row is there to show you how
+little Brier can separate. So do not read the Brier line first. Read these:
+
+- **paired Brier CI** — if it straddles zero, the run has told you nothing
+  about which is better, and the sample-size line says how much more data a
+  verdict needs.
+- **edge coef** — the real question: does the model's disagreement with the
+  price predict the outcome once the price itself is accounted for? Positive
+  with a CI clear of zero means genuine edge.
+- **book coef** — a sanity rail. The closing line is a strong predictor given
+  enough samples, so a book coefficient whose CI spans zero means the sample is
+  too small to score _anything_, and every other number on the page is noise.
+- **lambda slope** — 1.0 is a calibrated mean. Above 1.0 the model is shrinking
+  λ toward the league average while the market commits further, which is a
+  probability-map problem (see [docs/FEATURE_IDEAS.md](docs/FEATURE_IDEAS.md)
+  §4), not a bad-λ problem.
+
+The by-tier table is only meaningful once the tier labels and the served probs
+come from the same code that is running now: tiers are written at prediction
+time, and rows priced before the per-line Platt maps activate
+(`model_version` without a `-recal` suffix) are not comparable to rows priced
+after.
+
 ## Model evaluation
 
 ```shell
@@ -72,7 +117,30 @@ Settle finished fixtures and show the rolling scorecard:
 .venv/Scripts/python -m model.evaluate dispersion    # distribution-family check
 .venv/Scripts/python -m model.evaluate sweep-blend   # blend-weight sweep
 .venv/Scripts/python -m model.evaluate sweep-poisson # half-life x alpha sweep
+.venv/Scripts/python -m model.evaluate conditional   # book-population eval:
+                       # each match scored only at the half-lines straddling
+                       # its own E[total] — the tail-line (4.5/5.5) skill check
+.venv/Scripts/python -m model.evaluate h2h           # pairwise H2H gate,
+                       # 1x2 + totals, with the skill/pace control arms and
+                       # the half-life x shrinkage sweep (docs/H2H_FEATURE.md)
 ```
+
+## H2H stacker engagement tracker
+
+How close each population is to the `X12_H2H_MIN_N` (500) decisive graded
+rows the stacker needs before `X12_H2H_ENABLED=true` does anything. Counts
+through h2h's own fit queries, so it can never drift from the engagement
+logic. Read-only, safe while the app runs.
+
+```shell
+.venv/Scripts/python scripts/h2h_accrual.py
+```
+
+Prints per-population `n/500`, the home/away outcome split (a one-outcome
+window cannot fit), the current accrual rate, and an ETA. Exit code 0 once
+every population is READY — usable as a check in a loop or a scheduled
+task. Flipping the flag early is safe: a below-bar population serves
+identity, untagged, and engages automatically when it clears.
 
 ## Tests
 

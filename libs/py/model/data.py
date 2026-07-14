@@ -21,7 +21,7 @@ DEDUP_KEY = ["date", "kickoff_ts", "home_player", "away_player", "home_ft", "awa
 def load_matches(conn: sqlite3.Connection) -> pd.DataFrame:
     df = pd.read_sql_query(
         "SELECT id AS match_id, source_match_id, date, kickoff_ts, competition,"
-        " home_player, away_player, home_ft, away_ft"
+        " home_player, away_player, home_club, away_club, home_ft, away_ft"
         " FROM matches WHERE status = ? AND home_ft IS NOT NULL AND away_ft IS NOT NULL",
         conn,
         params=(STATUS_FINISHED,),
@@ -34,7 +34,13 @@ def load_matches(conn: sqlite3.Connection) -> pd.DataFrame:
 
 
 def long_format(df: pd.DataFrame) -> pd.DataFrame:
-    """Two rows per match: one per side. The entity is the player."""
+    """Two rows per match: one per side.
+
+    The player is the primary entity. The club (the team that side drove) is
+    carried alongside when present, as a second entity the Poisson GLM may
+    optionally condition on (docs/CLUB_FEATURE.md); frames without club
+    columns — synthetic test leagues — round-trip unchanged.
+    """
     home = df.assign(
         player=df["home_player"], opponent=df["away_player"], is_home=1,
         goals_for=df["home_ft"], goals_against=df["away_ft"],
@@ -45,6 +51,10 @@ def long_format(df: pd.DataFrame) -> pd.DataFrame:
     )
     cols = ["match_id", "date", "kickoff_ts", "player", "opponent", "is_home",
             "goals_for", "goals_against"]
+    if "home_club" in df.columns:
+        home = home.assign(club=df["home_club"], opp_club=df["away_club"])
+        away = away.assign(club=df["away_club"], opp_club=df["home_club"])
+        cols += ["club", "opp_club"]
     out = pd.concat([home[cols], away[cols]], ignore_index=True)
     return out.sort_values(["kickoff_ts", "match_id", "is_home"],
                            ascending=[True, True, False]).reset_index(drop=True)

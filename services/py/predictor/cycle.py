@@ -14,16 +14,19 @@ import argparse
 import sys
 import time
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 import pandas as pd
 
 from core.config import OFFSET_TOL_MIN, settings
-from core.schema import PredictionRow
-from model import data, registry
-from model.blend import blend_sides, totals_probs
+from core.markets import x12_probs
+from core.schema import PredictionRow, X12PredictionRow
+from model import data, h2h, recal, registry
+from model.blend import PMF_MAX_GOALS, blend_sides, totals_probs
 from model.heuristic import FormIndex
+from store import aliases
 from store.db import connect
-from store.repo import PredictionRepo
+from store.repo import PredictionRepo, X12PredictionRepo
 
 
 def _alias(conn, name: str | None) -> str | None:
@@ -34,8 +37,9 @@ def _alias(conn, name: str | None) -> str | None:
     return row["player"] if row else name
 
 
-def _latest_odds(conn, event_ids: list[str]) -> dict[str, list]:
-    """Latest snapshot batch per event -> {'ou': {line: {sel: (odds, implied)}}}"""
+def _latest_odds(conn, event_ids: list[str]) -> dict[str, dict]:
+    """Latest snapshot batch per event ->
+    {'ou': {line: {sel: (odds, implied)}}, 'x12': {sel: (odds, implied)}}"""
     if not event_ids:
         return {}
     ph = ",".join("?" * len(event_ids))
@@ -48,11 +52,12 @@ def _latest_odds(conn, event_ids: list[str]) -> dict[str, list]:
     ).fetchall()
     out: dict[str, dict] = {}
     for r in rows:
-        if r["market"] != "ou" or r["line"] is None:
-            continue
-        ev = out.setdefault(r["event_id"], {})
-        ev.setdefault(float(r["line"]), {})[r["selection"]] = (
-            r["odds"], r["implied_prob"])
+        ev = out.setdefault(r["event_id"], {"ou": {}, "x12": {}})
+        if r["market"] == "ou" and r["line"] is not None:
+            ev["ou"].setdefault(float(r["line"]), {})[r["selection"]] = (
+                r["odds"], r["implied_prob"])
+        elif r["market"] == "1x2":
+            ev["x12"][r["selection"]] = (r["odds"], r["implied_prob"])
     return out
 
 
@@ -67,11 +72,21 @@ def _tier(confidence: float, s) -> str | None:
 
 
 def _fixture_lambdas(f, pm, form_idx, fallback, cutoff, s):
-    """(lam_h, lam_a) per the served totals source, or (None, None) uncovered."""
+    """(lam_h, lam_a) per the served totals source, or (None, None) uncovered.
+
+    Coverage is a statement about *players* only. An unknown club has catt =
+    cdfn = 0 and silently yields the player-only λ, so passing clubs is safe
+    whether or not pm was fitted with them — and it never suppresses a pick.
+    The kickoff hour is passed the same way: against a model fitted without
+    the tod block it is a strict no-op (docs/TOD_FEATURE.md), so neither
+    feature flag changes this call site.
+    """
     hp, ap = f["home_player"], f["away_player"]
     if hp not in pm.players or ap not in pm.players:
         return None, None
-    lam_p = pm.predict_sides(hp, ap)
+    kick = datetime.fromisoformat(f["start_time_utc"])
+    lam_p = pm.predict_sides(hp, ap, f["home_club"], f["away_club"],
+                             hour=kick.hour + kick.minute / 60.0)
     cut64 = pd.Timestamp(cutoff).tz_convert("UTC").tz_localize(None).to_datetime64()
     lam_f = (form_idx.side_lambda(hp, ap, cut64, fallback),
              form_idx.side_lambda(ap, hp, cut64, fallback))
@@ -80,13 +95,29 @@ def _fixture_lambdas(f, pm, form_idx, fallback, cutoff, s):
     return lam_p
 
 
-def _line_row(f, line, sels, lam_h, lam_a, now, cutoff, version, s) -> PredictionRow:
+def _row_version(version: str, maps, line) -> str:
+    """'-recal2' marks rows a map actually touched — never the whole batch.
+    Populations diverge here: schedule rows pass identity maps and stay
+    untagged (docs/POPULATION_SPLIT.md Phase 0).
+
+    The 2 is the fit generation: plain '-recal' rows (2026-07-11..07-13)
+    were priced through maps fit on served p_over — the closed loop
+    docs/RECAL_SERVING.md 2026-07-13 documents. Settlement regen matches
+    on the '-recal' substring, so both generations regen through the
+    current maps; analytics can split generations on the exact tag."""
+    return version + ("-recal2" if float(line) in maps else "")
+
+
+def _line_row(f, line, sels, lam_h, lam_a, now, cutoff, version, s,
+              maps) -> PredictionRow:
     book_over, book_under = sels["over"][1], sels["under"][1]
     covered = lam_h is not None
 
     if covered:
         p_over, p_push, p_under = totals_probs(lam_h, lam_a, line)
+        p_over, p_push, p_under = recal.apply_to_line(maps, line, p_over, p_push)
         source = s.totals_source
+        version = _row_version(version, maps, line)
     else:  # book fallback: no pick without model coverage
         p_over, p_push, p_under = book_over or 0.5, 0.0, book_under or 0.5
         source = "book"
@@ -97,9 +128,25 @@ def _line_row(f, line, sels, lam_h, lam_a, now, cutoff, version, s) -> Predictio
         sel = "over" if p_over > p_under else "under"
         model_p = p_over if sel == "over" else p_under
         book_p = (book_over if sel == "over" else book_under) or 0.0
-        confidence = round(0.5 * model_p + 0.5 * book_p, 6)
+        # Confidence is the model's own probability, never blended with the
+        # book's. The book prices the main line at ~0.5 by construction, so
+        # averaging it in only shrinks every book-priced row halfway to a
+        # coin flip and demotes its tier relative to an identical
+        # schedule-only row. The book's information enters through value_flag,
+        # which is where a price belongs.
+        confidence = round(model_p, 6)
         value = (model_p - book_p) >= s.min_edge
-        if confidence >= s.tier_lean and p_push <= s.max_push_prob:
+        # a pick is only surfaced above the parent-validated probability gate
+        # (0.60) — near-coin-flip calls stay pick-less.
+        # The maps clause is priced-population doctrine (docs/POPULATION_SPLIT.md):
+        # once this population's maps are engaged, a line WITHOUT a map has too
+        # few graded samples to know its correction, and raw confidence there
+        # is exactly the adverse-selection surface — measured 2026-07-13, the
+        # residual priced picks leaking through unmapped 6.5 hit 47.6%. With
+        # maps empty (cold start / RECAL_ENABLED=false) every line picks as
+        # before: the clause never changes rollback behavior.
+        if confidence >= s.pick_prob_threshold and p_push <= s.max_push_prob \
+                and (not maps or float(line) in maps):
             pick, tier = sel, _tier(confidence, s)
 
     return PredictionRow(
@@ -113,18 +160,66 @@ def _line_row(f, line, sels, lam_h, lam_a, now, cutoff, version, s) -> Predictio
     )
 
 
+def _x12_row(f, lam_h, lam_a, x12_odds, now, cutoff, version, s,
+             stack=None, h2h_idx=None) -> X12PredictionRow:
+    """One 1x2 row per covered fixture, priced off the same served λs as the
+    totals rows (docs/X12_SERVING.md). The gate is x12_pick_prob_threshold
+    (0.50, measured), NOT the totals 0.60 — max-of-three lives on a different
+    scale and the totals gate would surface ~1% of matches. In practice the
+    argmax is never the draw at these λs, so picks are home/away.
+
+    `stack` must be this population's own H2H stacker or None
+    (docs/H2H_FEATURE.md; the recal population rule). It re-splits only the
+    decisive mass at the row's own cutoff — features at `cutoff`, not
+    kickoff: a pair can rematch between an early batch and kickoff, and an
+    early row must not see that meeting. p_draw is untouched. Rows a stacker
+    touched carry '-h2h', never the whole batch (the '-recal' convention);
+    the pick gate reads the restacked probs — that is the point."""
+    p_home, p_draw, p_away = x12_probs(lam_h, lam_a, PMF_MAX_GOALS)
+    if stack is not None:
+        cut64 = pd.Timestamp(cutoff).tz_convert("UTC").tz_localize(None) \
+            .to_datetime64()
+        feats = h2h_idx.features(f["home_player"], f["away_player"], cut64)
+        s_new = stack.apply_one(p_home / max(p_home + p_away, 1e-12), feats)
+        p_home, p_draw, p_away = h2h.restack_x12(s_new, p_draw)
+        version = version + "-h2h"
+    probs = {"home": p_home, "draw": p_draw, "away": p_away}
+    sel = max(probs, key=probs.get)
+    pick = confidence = None
+    value = False
+    if probs[sel] >= s.x12_pick_prob_threshold:
+        pick, confidence = sel, round(probs[sel], 6)
+        book_p = (x12_odds.get(sel) or (None, None))[1]
+        value = book_p is not None and (probs[sel] - book_p) >= s.min_edge
+    return X12PredictionRow(
+        event_id=f["event_id"], predicted_at=now, p_home=round(p_home, 6),
+        p_draw=round(p_draw, 6), p_away=round(p_away, 6),
+        lambda_home=round(lam_h, 4), lambda_away=round(lam_a, 4),
+        pick=pick, confidence=confidence, value_flag=value,
+        model_version=version, as_of_cutoff_ts=cutoff,
+    )
+
+
 SCHEDULE_PREFIX = "gtl:"  # predictions for league-scheduled games without odds
 SCHEDULE_LINES_AROUND = (-0.5, +0.5)  # canonical half-lines straddling E[total]
 
 
-def _schedule_row(f, line, lam_h, lam_a, now, cutoff, version, s) -> PredictionRow:
-    """Model-only prediction: no book yet, so confidence is the model prob
-    alone and value_flag stays false (value needs a price to beat)."""
+def _schedule_row(f, line, lam_h, lam_a, now, cutoff, version, s,
+                  maps) -> PredictionRow:
+    """Model-only prediction: same confidence scale as a priced row, but
+    value_flag stays false (value needs a price to beat).
+
+    `maps` must be this population's own maps — never the priced-population
+    fit. The two populations do not share a calibration curve (priced
+    a ≈ 0.14 vs schedule a ≈ 1.30, docs/POPULATION_SPLIT.md); priced maps
+    applied here would suppress the model's best picks."""
     p_over, p_push, p_under = totals_probs(lam_h, lam_a, line)
+    p_over, p_push, p_under = recal.apply_to_line(maps, line, p_over, p_push)
+    version = _row_version(version, maps, line)
     sel = "over" if p_over > p_under else "under"
     confidence = round(p_over if sel == "over" else p_under, 6)
     pick = tier = None
-    if confidence >= s.tier_lean and p_push <= s.max_push_prob:
+    if confidence >= s.pick_prob_threshold and p_push <= s.max_push_prob:
         pick, tier = sel, _tier(confidence, s)
     return PredictionRow(
         event_id=f["event_id"], predicted_at=now, totals_source=s.totals_source,
@@ -178,7 +273,10 @@ def run_cycle(conn, db_path, now: datetime | None = None) -> dict:
     odds = _latest_odds(conn, [f["event_id"] for f in fixtures])
 
     pm = registry.get_poisson(conn, db_path,
-                              half_life=s.half_life_days, alpha=s.poisson_alpha)
+                              half_life=s.half_life_days, alpha=s.poisson_alpha,
+                              with_club=s.club_enabled,
+                              with_tod=s.tod_enabled)
+    club_map = aliases.club_alias_map(conn) if s.club_enabled else {}
     df = data.load_matches(conn)
     recent = df[df["kickoff_ts"] >= pd.Timestamp(now)
                 - pd.Timedelta(days=s.form_window_days)]
@@ -186,31 +284,80 @@ def run_cycle(conn, db_path, now: datetime | None = None) -> dict:
     fallback = float(recent["home_ft"].add(recent["away_ft"]).mean() / 2) \
         if len(recent) else float("nan")
 
+    # per-line Platt maps from settled predictions; {} (identity) until a
+    # line accrues recal_min_n graded samples — or recal_min_n_line for the
+    # shared-slope hierarchical tier. See docs/RECAL_SERVING.md.
+    # Fit per population, never pooled (docs/POPULATION_SPLIT.md: priced
+    # a ≈ 0.14 vs schedule a ≈ 1.30 — no shared calibration curve). Same
+    # knobs for both; the schedule pool accrues ~3× faster so it engages
+    # sooner on its own.
+    maps = (recal.fit_line_maps(conn, s.recal_days, s.recal_min_n,
+                                s.recal_min_n_line, now=now)
+            if s.recal_enabled else {})
+    maps_sched = (recal.fit_line_maps(conn, s.recal_days, s.recal_min_n,
+                                      s.recal_min_n_line, now=now,
+                                      population="schedule")
+                  if s.recal_enabled else {})
+
+    # H2H stacker on the 1x2 head (docs/H2H_FEATURE.md). Per population,
+    # never pooled; None (identity, no '-h2h' tag) until a population has
+    # x12_h2h_min_n decisive graded rows. The index is built from the full
+    # match frame — features are cutoff-addressed, so one index serves every
+    # fixture in the slate.
+    h2h_idx = h2h_stack = h2h_stack_sched = None
+    if s.x12_enabled and s.x12_h2h_enabled:
+        h2h_idx = h2h.H2HIndex(df)
+        h2h_stack = h2h.fit_stacker(conn, s.x12_h2h_days, s.x12_h2h_min_n,
+                                    h2h_idx, now=now)
+        h2h_stack_sched = h2h.fit_stacker(conn, s.x12_h2h_days,
+                                          s.x12_h2h_min_n, h2h_idx,
+                                          population="schedule", now=now)
+
+    # '-recal' is NOT appended here: it is a per-row property (_row_version),
+    # not a batch property — schedule rows pass through identity while the
+    # priced maps engage, and must not carry the tag.
     version = (f"{s.totals_source}-w{s.totals_blend_weight:g}"
-               f"-hl{s.half_life_days:g}-a{s.poisson_alpha:g}")
+               f"-hl{s.half_life_days:g}-a{s.poisson_alpha:g}"
+               + ("-club" if pm.with_club else "")
+               + ("-tod" if pm.with_tod else ""))
     out: list[PredictionRow] = []
+    x12_out: list[X12PredictionRow] = []
     slate = []
+    seen_clubs: list[str] = []
     for f in fixtures:  # event_id is the table PK — rows are unique
         ev_odds = odds.get(f["event_id"], {})
         if not ev_odds:
             continue  # nothing priced -> nothing to predict against
         f = dict(f, home_player=_alias(conn, f["home_player"]),
-                 away_player=_alias(conn, f["away_player"]))
+                 away_player=_alias(conn, f["away_player"]),
+                 home_club=aliases.resolve_club(f["home_raw"], club_map),
+                 away_club=aliases.resolve_club(f["away_raw"], club_map))
+        seen_clubs += [f["home_raw"], f["away_raw"]]
         kickoff = datetime.fromisoformat(f["start_time_utc"])
         # as-of guard: form may only see results published before the cutoff
         cutoff = min(now, kickoff - timedelta(minutes=OFFSET_TOL_MIN))
         lam_h, lam_a = _fixture_lambdas(f, pm, form_idx, fallback, cutoff, s)
 
-        for line, sels in sorted(ev_odds.items()):
+        for line, sels in sorted(ev_odds["ou"].items()):
             if "over" not in sels or "under" not in sels:
                 continue
-            row = _line_row(f, line, sels, lam_h, lam_a, now, cutoff, version, s)
+            row = _line_row(f, line, sels, lam_h, lam_a, now, cutoff, version,
+                            s, maps)
             out.append(row)
             slate.append((f, line, row.pick, row.tier, row.p_over))
 
+        if s.x12_enabled and lam_h is not None:
+            x12_out.append(_x12_row(f, lam_h, lam_a, ev_odds["x12"], now,
+                                    cutoff, version, s,
+                                    stack=h2h_stack, h2h_idx=h2h_idx))
+
     for f in scheduled:
+        # home_raw here is built from matches.*_club, already canonical; the
+        # resolver is idempotent so both sources go through the same path
         f = dict(f, home_player=_alias(conn, f["home_player"]),
-                 away_player=_alias(conn, f["away_player"]))
+                 away_player=_alias(conn, f["away_player"]),
+                 home_club=aliases.resolve_club(f["home_raw"], club_map),
+                 away_club=aliases.resolve_club(f["away_raw"], club_map))
         kickoff = datetime.fromisoformat(f["start_time_utc"])
         cutoff = min(now, kickoff - timedelta(minutes=OFFSET_TOL_MIN))
         lam_h, lam_a = _fixture_lambdas(f, pm, form_idx, fallback, cutoff, s)
@@ -219,12 +366,29 @@ def run_cycle(conn, db_path, now: datetime | None = None) -> dict:
         base = max(1.0, round(lam_h + lam_a))
         for dl in SCHEDULE_LINES_AROUND:
             row = _schedule_row(f, base + dl, lam_h, lam_a, now, cutoff,
-                                version, s)
+                                version, s, maps_sched)
             out.append(row)
             slate.append((f, row.line, row.pick, row.tier, row.p_over))
+        if s.x12_enabled:  # no book 1x2 here -> value_flag stays False
+            x12_out.append(_x12_row(f, lam_h, lam_a, {}, now, cutoff,
+                                    version, s,
+                                    stack=h2h_stack_sched, h2h_idx=h2h_idx))
 
     n = PredictionRepo(conn).append_many(out)
+    n_x12 = X12PredictionRepo(conn).append_many(x12_out) if x12_out else 0
+    # Names the GLM has never seen. Transient after a regime switch (every
+    # World Cup country is cold for ~a week); a *playing* club that stays here
+    # means a missing club_aliases row and a quietly club-blind λ.
+    unresolved = (sorted(aliases.unresolved_clubs(conn, seen_clubs))
+                  if s.club_enabled else [])
     return {"fixtures": len(fixtures), "scheduled": len(scheduled), "rows": n,
+            "x12_rows": n_x12, "recal_lines": sorted(maps),
+            "recal_lines_sched": sorted(maps_sched),
+            # n_fit per engaged population; 0 = identity (below min_n or off)
+            "x12_h2h_n": {"priced": h2h_stack.n_fit if h2h_stack else 0,
+                          "schedule": (h2h_stack_sched.n_fit
+                                       if h2h_stack_sched else 0)},
+            "unresolved_clubs": unresolved,
             "elapsed_s": round(time.perf_counter() - t0, 2), "slate": slate}
 
 
@@ -233,12 +397,19 @@ def main(argv=None) -> int:
     ap.add_argument("--db", default=None)
     args = ap.parse_args(argv)
     s = settings()
-    db_path = args.db or s.gtl_db_path
+    db_path = Path(args.db) if args.db else s.gtl_db_path
     conn = connect(db_path)
 
     rep = run_cycle(conn, db_path)
     print(f"fixtures={rep['fixtures']} scheduled={rep.get('scheduled', 0)} "
-          f"prediction_rows={rep['rows']} elapsed={rep['elapsed_s']}s")
+          f"prediction_rows={rep['rows']} x12_rows={rep.get('x12_rows', 0)} "
+          f"recal_lines={rep.get('recal_lines', [])} "
+          f"recal_lines_sched={rep.get('recal_lines_sched', [])} "
+          f"x12_h2h_n={rep.get('x12_h2h_n', {})} "
+          f"elapsed={rep['elapsed_s']}s")
+    if rep.get("unresolved_clubs"):
+        print(f"  unresolved clubs (priced club-blind): "
+              f"{', '.join(rep['unresolved_clubs'])}", file=sys.stderr)
     for f, line, pick, tier, p_over in rep.get("slate", []):
         label = f"{pick} ({tier})" if pick else "no pick"
         print(f"  {f['start_time_utc'][11:16]}Z {f['home_raw']} v {f['away_raw']}"
