@@ -7,6 +7,7 @@ On 401/403 this raises FeedError — an operational alert, never silent.
 """
 
 import json
+import time
 
 import httpx
 
@@ -18,6 +19,7 @@ class FeedError(RuntimeError):
 
 
 LIST_PATH = "/api/sportsbook/v4/events/lists/by-queries"
+RETRIES = 2  # transient timeouts/resets; auth failures never retry
 
 
 def client() -> httpx.Client:
@@ -62,7 +64,14 @@ def build_query(skip: int = 0, take: int = 100,
 def fetch_page(c: httpx.Client, skip: int = 0, take: int = 100,
                event_type: str = "UPCOMING") -> bytes:
     q = json.dumps(build_query(skip, take, event_type), separators=(",", ":"))
-    r = c.get(LIST_PATH, params={"q": q})
+    for attempt in range(RETRIES + 1):
+        try:
+            r = c.get(LIST_PATH, params={"q": q})
+            break
+        except httpx.TransportError:
+            if attempt == RETRIES:
+                raise
+            time.sleep(2 * (attempt + 1))
     if r.status_code in (401, 403):
         raise FeedError(
             f"token_expired: HTTP {r.status_code} — re-capture scraper/betpawa.curl "

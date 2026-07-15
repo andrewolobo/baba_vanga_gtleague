@@ -5,11 +5,14 @@
   python -m odds_ingest.cli unmatched                  # alias-table worklist
 
 Every fetch upserts `fixtures` and APPENDS to `odds_snapshots` (full odds
-history). Raw pages are archived under data/raw/odds/. Exit code 3 = FeedError.
+history). Raw pages are archived under data/raw/odds/.
+Exit codes: 3 = FeedError (auth/blocking), 4 = transient network error.
 """
 
 import argparse
 import sys
+
+import httpx
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -129,6 +132,10 @@ def main(argv: list[str] | None = None) -> int:
     except fetch.FeedError as e:
         print(f"FEED ERROR: {e}", file=sys.stderr)
         return 3
+    except httpx.HTTPError as e:
+        print(f"NETWORK ERROR: {type(e).__name__}: {e} — transient, "
+              "next scheduled run will retry", file=sys.stderr)
+        return 4
 
 
 if __name__ == "__main__":

@@ -558,10 +558,13 @@ function renderRateChart({ hostId, ttId, cardId, daily, rateLabel, noun, empty }
 
 const perf = { days: 30, data: null,
                sort: { key: 'kickoff', dir: 'desc' },
-               filters: { match: '', population: 'all', gate: 'all',
+               filters: { match: '', date: '', population: 'all', gate: 'all',
                           line: 'all', side: 'all', outcome: 'all' } };
-const P_FILTER_IDS = { match: 'p-match', population: 'p-pop', gate: 'p-gate',
-                       line: 'p-line', side: 'p-side', outcome: 'p-outcome' };
+const P_FILTER_IDS = { match: 'p-match', date: 'p-date', population: 'p-pop',
+                       gate: 'p-gate', line: 'p-line', side: 'p-side',
+                       outcome: 'p-outcome' };
+// filters whose empty state is '' (the rest use the 'all' sentinel)
+const TEXT_FILTERS = new Set(['match', 'date']);
 
 const outcomeOf = (r) => r.model_side_correct == null ? 'push'
   : r.model_side_correct ? 'hit' : 'miss';
@@ -573,12 +576,15 @@ function perfRows() {
 
 function perfFiltersActive() {
   const f = perf.filters;
-  return !!f.match.trim() || f.gate !== 'all' || f.line !== 'all'
+  return !!f.match.trim() || !!f.date || f.gate !== 'all' || f.line !== 'all'
     || f.side !== 'all' || f.outcome !== 'all';
 }
 
 function perfMatches(r) {
   const f = perf.filters;
+  // same local-day basis as the chart, so the filtered table and the daily
+  // point for that date always agree
+  if (f.date && localDay(r.kickoff) !== f.date) return false;
   if (f.population !== 'all' && r.population !== f.population) return false;
   if (f.gate === 'picks' && !isPick(r)) return false;
   if (f.gate === 'nopicks' && isPick(r)) return false;
@@ -860,7 +866,7 @@ function renderPerf() {
 function syncPerfChrome() {
   for (const [key, id] of Object.entries(P_FILTER_IDS)) {
     const el = $(id);
-    const on = key === 'match' ? !!perf.filters.match.trim()
+    const on = TEXT_FILTERS.has(key) ? !!perf.filters[key].trim()
       : perf.filters[key] !== 'all';
     el.classList.toggle('on', on);
   }
@@ -903,10 +909,10 @@ function wirePerfFilters() {
     });
   }
   $('p-reset').onclick = () => {
-    perf.filters = { match: '', population: 'all', gate: 'all', line: 'all',
-                     side: 'all', outcome: 'all' };
+    perf.filters = { match: '', date: '', population: 'all', gate: 'all',
+                     line: 'all', side: 'all', outcome: 'all' };
     for (const [key, id] of Object.entries(P_FILTER_IDS)) {
-      $(id).value = key === 'match' ? '' : 'all';
+      $(id).value = TEXT_FILTERS.has(key) ? '' : 'all';
     }
     syncPerfChrome();
     renderPerf();
@@ -938,10 +944,12 @@ async function loadPerf() {
 
 const X12_OUTCOMES = ['home', 'draw', 'away'];
 const x12perf = { sort: { key: 'kickoff', dir: 'desc' },
-                  filters: { match: '', club: 'all', population: 'all',
-                             gate: 'all', side: 'all', outcome: 'all' } };
-const X_FILTER_IDS = { match: 'x-match', club: 'x-club', population: 'x-pop',
-                       gate: 'x-gate', side: 'x-side', outcome: 'x-outcome' };
+                  filters: { match: '', date: '', club: 'all',
+                             population: 'all', gate: 'all', side: 'all',
+                             outcome: 'all' } };
+const X_FILTER_IDS = { match: 'x-match', date: 'x-date', club: 'x-club',
+                       population: 'x-pop', gate: 'x-gate', side: 'x-side',
+                       outcome: 'x-outcome' };
 
 const x12PerfRows = () => perf.data?.x12 ?? [];
 const x12TopP = (r) => Math.max(r.p_home, r.p_draw, r.p_away);
@@ -952,12 +960,18 @@ const x12BookP = (r) => r[`book_p_${r.side}`];
    model's read (its top outcome), picked or not. */
 function x12Matches(r) {
   const f = x12perf.filters;
+  if (f.date && localDay(r.kickoff) !== f.date) return false;
   if (f.population !== 'all' && r.population !== f.population) return false;
   if (f.gate === 'picks' && r.pick == null) return false;
   if (f.gate === 'nopicks' && r.pick != null) return false;
   if (f.side !== 'all' && r.side !== f.side) return false;
-  if (f.outcome !== 'all'
-      && (r.side_correct ? 'hit' : 'miss') !== f.outcome) return false;
+  if (f.outcome !== 'all') {
+    // same four-way split the table's outcome column shows: picked rows are
+    // hit/miss, gate-suppressed rows are the hypothetical would-hit/would-miss
+    const o = (r.pick != null ? '' : 'would-')
+      + (r.side_correct ? 'hit' : 'miss');
+    if (o !== f.outcome) return false;
+  }
   if (f.club !== 'all' && r.home_club !== f.club && r.away_club !== f.club) {
     return false;
   }
@@ -972,13 +986,14 @@ function x12Matches(r) {
 
 function x12FiltersActive() {
   const f = x12perf.filters;
-  return !!f.match.trim() || f.club !== 'all' || f.population !== 'all'
-    || f.gate !== 'all' || f.side !== 'all' || f.outcome !== 'all';
+  return !!f.match.trim() || !!f.date || f.club !== 'all'
+    || f.population !== 'all' || f.gate !== 'all' || f.side !== 'all'
+    || f.outcome !== 'all';
 }
 
 function syncX12Chrome() {
   for (const [key, id] of Object.entries(X_FILTER_IDS)) {
-    const on = key === 'match' ? !!x12perf.filters.match.trim()
+    const on = TEXT_FILTERS.has(key) ? !!x12perf.filters[key].trim()
       : x12perf.filters[key] !== 'all';
     $(id).classList.toggle('on', on);
   }
@@ -1012,10 +1027,10 @@ function wireX12Filters() {
     });
   }
   $('x-reset').onclick = () => {
-    x12perf.filters = { match: '', club: 'all', population: 'all',
+    x12perf.filters = { match: '', date: '', club: 'all', population: 'all',
                         gate: 'all', side: 'all', outcome: 'all' };
     for (const [key, id] of Object.entries(X_FILTER_IDS)) {
-      $(id).value = key === 'match' ? '' : 'all';
+      $(id).value = TEXT_FILTERS.has(key) ? '' : 'all';
     }
     syncX12Chrome();
     renderX12Perf();

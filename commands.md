@@ -110,6 +110,43 @@ time, and rows priced before the per-line Platt maps activate
 (`model_version` without a `-recal` suffix) are not comparable to rows priced
 after.
 
+### 1x2 vs the book
+
+Same question asked of the 1x2 head: the served home/draw/away triple vs the
+last de-vigged 1x2 price before kickoff. Priced population only by
+construction — schedule (`gtl:`) rows have no book side. Rows settled without
+a stored 1x2 close are excluded (the count is printed).
+
+```shell
+.venv/Scripts/python -m settlement.settle x12-vs-book --days 7
+.venv/Scripts/python -m settlement.settle x12-vs-book --days 30 --boot 500
+```
+
+`--boot` / `--seed` behave as in `vs-book`.
+
+**How to read it.** Same discipline as the totals command — the headline
+multiclass Brier is a weak lens (both series sit near the outcome base rates),
+so read past it:
+
+- **edge coef** — fit on the DECISIVE SHARE `s = p_home/(p_home+p_away)`,
+  decisive rows only, because that is the only axis serving can move: the H2H
+  stacker reshapes `s` and `p_draw` is served raw. Positive with a CI clear of
+  zero means the model's disagreement with the 1x2 price carries information
+  the price does not have.
+- **book coef** — the same sanity rail as `vs-book`: CI spanning zero means
+  the sample can't score anything yet.
+- **draw head line** — the model's raw `p_draw` vs the book's. This head has
+  no stacker and no recal; if its Brier drifts well past the book's, that is a
+  λ/PMF problem, not a stacker problem.
+- **by h2h regime** — rows the stacker touched (`-h2h` in `model_version`)
+  vs rows it didn't. This is the live read on whether the stacker earns its
+  keep against the book; judge it only once the `-h2h` bucket has a few
+  hundred rows, and never compare hit rates across regimes at different
+  pick-gate mixes.
+
+`roi` is flat 1u on the model's argmax at the close for every row, picks or
+not — a diagnostic, not a strategy.
+
 ## Model evaluation
 
 ```shell

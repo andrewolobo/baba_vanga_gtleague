@@ -3,6 +3,7 @@
   python -m settlement.settle run          # settle finished, unsettled events
   python -m settlement.settle scorecard    # rolling hit rates / Brier
   python -m settlement.settle vs-book      # served probs vs the closing price
+  python -m settlement.settle x12-vs-book  # served 1x2 triple vs the closing price
   python -m settlement.settle tiers        # propose tier bands from served data
 
 Join rule (PHASE0_PROBES §0.4): fixture -> match on BOTH player names and an
@@ -34,9 +35,6 @@ from model.blend import PMF_MAX_GOALS, blend_sides, totals_probs
 from model.heuristic import FormIndex
 from store import aliases
 from store.db import connect
-
-SETTLE_DELAY_MIN = 45  # kickoff + match (~13 min) + publish + merge cadence
-
 
 def _served_prediction(conn, event_id: str, kickoff_iso: str):
     """Headline row of the last prediction batch made before kickoff."""
@@ -215,7 +213,7 @@ class _Regen:
 
 def run(conn, db_path, now: datetime | None = None) -> dict:
     now = now or datetime.now(timezone.utc)
-    ready = (now - timedelta(minutes=SETTLE_DELAY_MIN)).isoformat()
+    ready = (now - timedelta(minutes=settings().settle_delay_min)).isoformat()
     fixtures = conn.execute(
         "SELECT f.* FROM fixtures f"
         " WHERE f.start_time_utc <= ?"
@@ -710,6 +708,182 @@ def vs_book(conn, days: int = 7, boot: int = 2000, seed: int = 0) -> str:
     return "\n".join(out)
 
 
+# ── 1x2 vs book ──────────────────────────────────────────────────────────────
+#
+# vs_book's question asked of the 1x2 head (the X12_SERVING.md "not done"
+# item): does the served home/draw/away triple beat the last de-vigged 1x2
+# price before kickoff? Priced population only by construction — schedule
+# (gtl:) rows have no book side. The served batch is the one settlement
+# grades (_served_x12); x12 rows exist only for model-covered fixtures, so
+# there is no book-fallback exclusion to make. Scores are summed over the
+# three outcomes; the edge regression runs on the DECISIVE SHARE
+# s = p_home/(p_home+p_away), because that is the axis serving can move —
+# the H2H stacker reshapes s and p_draw is served raw (docs/H2H_FEATURE.md).
+
+_X12_VS_BOOK_QUERY = """
+    SELECT p.p_home, p.p_draw, p.p_away, p.pick, p.confidence, p.value_flag,
+           p.model_version, s.result, s.settled_at,
+           (SELECT o.implied_prob FROM odds_snapshots o
+             WHERE o.event_id = s.event_id AND o.market = '1x2'
+               AND o.selection = 'home' AND o.fetched_at < f.start_time_utc
+             ORDER BY o.fetched_at DESC LIMIT 1) AS b_home,
+           (SELECT o.implied_prob FROM odds_snapshots o
+             WHERE o.event_id = s.event_id AND o.market = '1x2'
+               AND o.selection = 'draw' AND o.fetched_at < f.start_time_utc
+             ORDER BY o.fetched_at DESC LIMIT 1) AS b_draw,
+           (SELECT o.implied_prob FROM odds_snapshots o
+             WHERE o.event_id = s.event_id AND o.market = '1x2'
+               AND o.selection = 'away' AND o.fetched_at < f.start_time_utc
+             ORDER BY o.fetched_at DESC LIMIT 1) AS b_away,
+           (SELECT o.odds FROM odds_snapshots o
+             WHERE o.event_id = s.event_id AND o.market = '1x2'
+               AND o.selection = 'home' AND o.fetched_at < f.start_time_utc
+             ORDER BY o.fetched_at DESC LIMIT 1) AS odds_home,
+           (SELECT o.odds FROM odds_snapshots o
+             WHERE o.event_id = s.event_id AND o.market = '1x2'
+               AND o.selection = 'draw' AND o.fetched_at < f.start_time_utc
+             ORDER BY o.fetched_at DESC LIMIT 1) AS odds_draw,
+           (SELECT o.odds FROM odds_snapshots o
+             WHERE o.event_id = s.event_id AND o.market = '1x2'
+               AND o.selection = 'away' AND o.fetched_at < f.start_time_utc
+             ORDER BY o.fetched_at DESC LIMIT 1) AS odds_away
+    FROM settlements_x12 s
+    JOIN fixtures f ON f.event_id = s.event_id
+    JOIN predictions_x12 p ON p.event_id = s.event_id
+     AND p.predicted_at = (SELECT MAX(predicted_at) FROM predictions_x12
+                           WHERE event_id = s.event_id
+                           AND predicted_at < f.start_time_utc)
+    WHERE s.settled_at >= ?
+"""
+
+_X12_BOOK_COLS = ["b_home", "b_draw", "b_away",
+                  "odds_home", "odds_draw", "odds_away"]
+
+
+def _x12_row_scores(df: pd.DataFrame) -> pd.DataFrame:
+    """Per-row scores shared by the headline and every breakdown. Multiclass
+    Brier = summed squared error over the three outcomes; hit/roi are on the
+    model's argmax side (in practice never the draw at this league's λs)."""
+    y = df["result"].map({"home": 0, "draw": 1, "away": 2}).to_numpy()
+    m = df[["p_home", "p_draw", "p_away"]].to_numpy(dtype=float)
+    b = df[["b_home", "b_draw", "b_away"]].to_numpy(dtype=float)
+    o = df[["odds_home", "odds_draw", "odds_away"]].to_numpy(dtype=float)
+    onehot = np.eye(3)[y]
+    idx = np.arange(len(y))
+    side = m.argmax(axis=1)
+    df = df.copy()
+    df["y_idx"] = y
+    df["mb"] = ((m - onehot) ** 2).sum(axis=1)
+    df["bb"] = ((b - onehot) ** 2).sum(axis=1)
+    df["m_ll"] = -np.log(np.clip(m[idx, y], _PROB_EPS, None))
+    df["b_ll"] = -np.log(np.clip(b[idx, y], _PROB_EPS, None))
+    df["m_hit"] = (side == y).astype(float)
+    df["b_hit"] = (b.argmax(axis=1) == y).astype(float)
+    df["roi"] = np.where(side == y, o[idx, side] - 1.0, -1.0)
+    return df
+
+
+def _x12_breakdown(df: pd.DataFrame, key: str, fmt=str) -> list[str]:
+    lines = [f"  {key:>10} {'n':>5} {'model':>8} {'book':>8} {'skill':>8}"
+             f" {'hit':>7} {'roi':>8}"]
+    for val, g in df.groupby(key, dropna=False, observed=True):
+        bm, bb = g["mb"].mean(), g["bb"].mean()
+        skill = 1 - bm / bb if bb > 0 else float("nan")
+        label = "(no pick)" if pd.isna(val) else fmt(val)
+        lines.append(f"  {label:>10} {len(g):>5} {bm:>8.4f} {bb:>8.4f}"
+                     f" {skill:>+7.2%} {g['m_hit'].mean():>7.1%}"
+                     f" {g['roi'].mean():>+7.2%}")
+    return lines
+
+
+def x12_vs_book(conn, days: int = 7, boot: int = 2000, seed: int = 0) -> str:
+    since = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+    df = pd.read_sql_query(_X12_VS_BOOK_QUERY, conn, params=(since,))
+    n_settled = len(df)
+    df = df.dropna(subset=_X12_BOOK_COLS)
+    if df.empty:
+        return "no settled 1x2 predictions with a book close in window"
+    df = _x12_row_scores(df)
+
+    n = len(df)
+    rng = np.random.default_rng(seed)
+    ts = pd.to_datetime(df["settled_at"], format="ISO8601")
+    span_days = max((ts.max() - ts.min()).total_seconds() / 86400.0, 1e-3)
+    shares = np.array([(df["y_idx"] == k).mean() for k in range(3)])
+    onehot = np.eye(3)[df["y_idx"].to_numpy()]
+    base_brier = float(np.mean(((shares - onehot) ** 2).sum(axis=1)))
+    base_ll = float(-np.mean(np.log(np.clip(shares[df["y_idx"]], _PROB_EPS,
+                                            None))))
+
+    out = [f"1x2 model vs book: {n} settled predictions in a {days}d window"
+           f" | spanning {span_days:.1f}d"
+           f" | {n_settled - n} settled without a 1x2 close (excluded)"
+           f" | outcomes h/d/a {shares[0]:.1%}/{shares[1]:.1%}/{shares[2]:.1%}",
+           "",
+           f"  {'':<22}{'Brier(3)':>9} {'LogLoss':>9} {'argmax-hit':>11}",
+           f"  {'model (as served)':<22}{df['mb'].mean():>9.4f}"
+           f" {df['m_ll'].mean():>9.4f} {df['m_hit'].mean():>10.1%}",
+           f"  {'book (de-vig close)':<22}{df['bb'].mean():>9.4f}"
+           f" {df['b_ll'].mean():>9.4f} {df['b_hit'].mean():>10.1%}",
+           f"  {'window base rates':<22}{base_brier:>9.4f}"
+           f" {base_ll:>9.4f} {'—':>11}"]
+
+    d = (df["mb"] - df["bb"]).to_numpy()
+    draws = [d[rng.integers(0, n, n)].mean() for _ in range(boot)]
+    lo, hi = _ci(draws)
+    verdict = ("model better" if hi < 0 else "book better" if lo > 0
+               else "NOT SIGNIFICANT")
+    out += ["",
+            f"paired Brier (model - book): {d.mean():+.5f}"
+            f"  95% CI [{lo:+.5f}, {hi:+.5f}]  {verdict}"]
+    if n >= 2:  # a 1-row window has no spread to size the sample from
+        need = int(np.ceil((1.96 * d.std(ddof=1) / _BRIER_RESOLUTION) ** 2))
+        eta = max(0.0, (need - n) / (n / span_days))
+        out += [f"  resolving a +/-{_BRIER_RESOLUTION} gap needs ~{need}"
+                f" settled predictions"
+                f" (~{eta:.0f} more days at {n / span_days:.0f}/day)."]
+
+    # Decisive share: the axis the head can actually move (the H2H stacker
+    # reshapes s, p_draw is served raw), so the edge question is asked there.
+    dec = df[df["result"] != "draw"]
+    y_dec = (dec["result"] == "home").to_numpy().astype(int)
+    if 0 < y_dec.sum() < len(dec):
+        s_m = (dec["p_home"] / (dec["p_home"] + dec["p_away"])).to_numpy()
+        s_b = (dec["b_home"] / (dec["b_home"] + dec["b_away"])).to_numpy()
+        e = _edge_coefs(s_m, s_b, y_dec, boot, rng)
+        out += ["",
+                f"does the model add anything to the price? (decisive share,"
+                f" {len(dec)} decisive rows)",
+                "  y ~ logit(s_book) + [logit(s_model) - logit(s_book)]",
+                f"  edge coef {e['edge']:+.3f}  95% CI"
+                f" [{e['edge_ci'][0]:+.3f}, {e['edge_ci'][1]:+.3f}]"
+                f"  P(>0) = {e['p_edge_positive']:.3f}",
+                f"  book coef {e['book']:+.3f}  95% CI"
+                f" [{e['book_ci'][0]:+.3f}, {e['book_ci'][1]:+.3f}]",
+                "  (a book coef whose CI spans 0 means the sample is too small"
+                " to score anything)"]
+
+    y_draw = (df["result"] == "draw").to_numpy().astype(int)
+    out += ["",
+            "draw head (served raw — no stacker, no recal):",
+            f"  Brier model p_draw {_brier(df['p_draw'].to_numpy(), y_draw):.4f}"
+            f"  vs book p_draw {_brier(df['b_draw'].to_numpy(), y_draw):.4f}"
+            f"  | realized draw rate {y_draw.mean():.1%}"
+            f" | mean served {df['p_draw'].mean():.1%}"
+            f" / book {df['b_draw'].mean():.1%}"]
+
+    df["h2h"] = np.where(df["model_version"].str.contains("-h2h"),
+                         "h2h", "pre-h2h")
+    out += ["", "by pick"] + _x12_breakdown(df, "pick")
+    out += ["", "by value flag"] + _x12_breakdown(
+        df, "value_flag", fmt=lambda v: "value" if v else "no value")
+    out += ["", "by h2h regime (rows the stacker touched carry -h2h)"] \
+        + _x12_breakdown(df, "h2h")
+    out += ["", "roi = flat 1u on the model's argmax at the closing price,"
+            " every row (not just picks)"]
+    return "\n".join(out)
+
+
 # ── tier re-quantile ─────────────────────────────────────────────────────────
 #
 # Tier bands must be quantiled against the confidence distribution the CURRENT
@@ -832,7 +1006,8 @@ def _tier_section(df: pd.DataFrame, s, days: int, min_picks: int) -> list[str]:
 
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(prog="settlement.settle")
-    ap.add_argument("cmd", choices=["run", "scorecard", "vs-book", "tiers"])
+    ap.add_argument("cmd", choices=["run", "scorecard", "vs-book",
+                                    "x12-vs-book", "tiers"])
     ap.add_argument("--db", default=None)
     ap.add_argument("--days", type=int, default=7)
     ap.add_argument("--boot", type=int, default=2000,
@@ -861,6 +1036,9 @@ def main(argv=None) -> int:
         return 0
     if args.cmd == "vs-book":
         print(vs_book(conn, args.days, args.boot, args.seed))
+        return 0
+    if args.cmd == "x12-vs-book":
+        print(x12_vs_book(conn, args.days, args.boot, args.seed))
         return 0
     if args.cmd == "tiers":
         print(tier_bands(conn, args.days))

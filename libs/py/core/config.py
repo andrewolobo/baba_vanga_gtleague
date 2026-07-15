@@ -88,6 +88,16 @@ class Settings(BaseSettings):
     x12_h2h_enabled: bool = False
     x12_h2h_days: int = 14
     x12_h2h_min_n: int = 500
+    # Minutes after scheduled kickoff before a fixture is ELIGIBLE for
+    # settlement — a first-touch churn guard, not a correctness guard (a
+    # missing result leaves the fixture pending; the NOT EXISTS loop
+    # retries). Measured 2026-07-15 on 14d of live-captured results:
+    # arrival at kickoff +21 min p50 / +24 p75, physical floor ~25 (13-min
+    # match + feed publish lag + 10-min results merge cadence). 30 clears
+    # the floor with drift margin; the arrival tail (p90 ~58) rides the
+    # pending retry either way. Do not lower further without re-measuring
+    # the arrival lag. Was 45 (component-sum guess) until 2026-07-15.
+    settle_delay_min: int = 30
     # Settle schedule-only (gtl:) predictions against their own match rows
     # (docs/POPULATION_SPLIT.md Phase 1). Additive and default-on: rows land
     # in the settlements table but every pre-existing consumer joins through

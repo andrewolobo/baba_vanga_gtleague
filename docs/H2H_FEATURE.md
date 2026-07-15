@@ -309,4 +309,6 @@ re-band any future x12 tiers on stacked confidences only.
   recorded run + sweep + split-half (see gate section) confirm it:
   +0.8…+1.3 pts per line, Brier improving everywhere, `pace_decay` alone
   sufficient. Serving it stays a separate Phase-2-style decision from the
-  1x2 stacker.
+  1x2 stacker — build plan: [TOTALS_H2H.md](TOTALS_H2H.md) (2026-07-15;
+  extends the recal map with the pace term rather than stacking a second
+  layer, lands dark).

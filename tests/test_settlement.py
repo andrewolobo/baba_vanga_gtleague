@@ -1,11 +1,11 @@
 from datetime import datetime, timedelta, timezone
 
 from core.config import settings
-from core.schema import MatchRow
+from core.schema import MatchRow, OddsPrice
 from model import recal
 from predictor.cycle import run_cycle
-from settlement.settle import run as settle_run, scorecard, vs_book
-from store.repo import MatchRepo
+from settlement.settle import run as settle_run, scorecard, vs_book, x12_vs_book
+from store.repo import MatchRepo, OddsRepo
 from tests.test_predictor import (  # noqa: F401  (fixture reuse)
     NOW, _schedule_game, _seed_settled_schedule, seeded)
 
@@ -135,6 +135,48 @@ def test_vs_book_empty_window(seeded):  # noqa: F811
     conn, db_path = seeded
     run_cycle(conn, db_path, now=NOW)
     assert "no settled" in vs_book(conn, days=365, boot=50)
+
+
+# ── 1x2 vs book ──────────────────────────────────────────────────────────────
+
+def _seed_x12_odds(conn, event_id="E1"):
+    OddsRepo(conn).append_many([
+        OddsPrice(event_id=event_id, market="1x2", line=None, selection="home",
+                  odds=2.0, implied_prob=0.50),
+        OddsPrice(event_id=event_id, market="1x2", line=None, selection="draw",
+                  odds=4.0, implied_prob=0.25),
+        OddsPrice(event_id=event_id, market="1x2", line=None, selection="away",
+                  odds=4.0, implied_prob=0.25)], fetched_at=NOW)
+
+
+def test_x12_vs_book_renders(seeded, monkeypatch):  # noqa: F811
+    conn, db_path = seeded
+    monkeypatch.setattr(settings(), "x12_enabled", True)
+    _seed_x12_odds(conn, "E1")
+    run_cycle(conn, db_path, now=NOW)
+    _play_result(conn, NOW + timedelta(minutes=30), hf=3, af=2)  # home win
+    settle_run(conn, db_path, now=LATER)
+
+    out = x12_vs_book(conn, days=365, boot=50)  # synthetic clock lags wall time
+    assert "1x2 model vs book: 1 settled predictions" in out
+    assert "paired Brier (model - book)" in out
+    assert "draw head" in out
+    assert "by h2h regime" in out
+    # single-class decisive outcome: edge regression skipped, not crashed
+    assert "edge coef" not in out
+
+
+def test_x12_vs_book_needs_a_book_close(seeded, monkeypatch):  # noqa: F811
+    """E1 settles for 1x2 but has no stored 1x2 odds — the row must be
+    excluded (there is no price to compare against), leaving nothing."""
+    conn, db_path = seeded
+    monkeypatch.setattr(settings(), "x12_enabled", True)
+    run_cycle(conn, db_path, now=NOW)
+    _play_result(conn, NOW + timedelta(minutes=30))
+    settle_run(conn, db_path, now=LATER)
+    assert conn.execute(
+        "SELECT COUNT(*) c FROM settlements_x12").fetchone()["c"] >= 1
+    assert "no settled" in x12_vs_book(conn, days=365, boot=50)
 
 
 # ── schedule-only (gtl:) settlement (docs/POPULATION_SPLIT.md Phase 1) ──────

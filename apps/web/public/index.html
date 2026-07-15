@@ -166,8 +166,12 @@
   .filters input, .filters select { font-family:'Newsreader',serif;
     font-size:13px; color:var(--ink); background:var(--surface);
     border:1px solid var(--line); border-radius:99px; padding:9px 14px; }
-  .filters input { min-width:250px; }
+  .filters input[type="search"] { min-width:250px; }
   .filters input::placeholder { color:var(--ink3); }
+  /* the native picker chrome follows the page theme, not the OS */
+  .filters input[type="date"] { color-scheme:light; }
+  [data-theme="dark"] .filters input[type="date"] { color-scheme:dark; }
+  .filters input[type="date"]:not(.on) { color:var(--ink2); }
   .filters select { cursor:pointer; }
   .filters input:focus, .filters select:focus { outline:none;
     border-color:var(--ink2); }
@@ -373,6 +377,8 @@
         <input id="p-match" type="search" autocomplete="off"
           aria-label="Filter by match"
           placeholder="Search match — player or club">
+        <input id="p-date" type="date" aria-label="Filter by kickoff date"
+          title="Show a single kickoff date (local)">
         <select id="p-pop" aria-label="Filter by population">
           <option value="all">Both populations</option>
           <option value="schedule">Model-only</option>
@@ -463,6 +469,8 @@
           <input id="x-match" type="search" autocomplete="off"
             aria-label="Filter by match"
             placeholder="Search match — player or club">
+          <input id="x-date" type="date" aria-label="Filter by kickoff date"
+            title="Show a single kickoff date (local)">
           <select id="x-club" aria-label="Filter by team">
             <option value="all">All teams</option>
           </select>
@@ -485,6 +493,8 @@
             <option value="all">Any outcome</option>
             <option value="hit">Hit</option>
             <option value="miss">Miss</option>
+            <option value="would-hit">Would hit</option>
+            <option value="would-miss">Would miss</option>
           </select>
           <button class="pill" id="x-reset" hidden>CLEAR</button>
         </div>
