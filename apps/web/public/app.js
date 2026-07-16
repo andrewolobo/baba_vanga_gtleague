@@ -559,15 +559,31 @@ function renderRateChart({ hostId, ttId, cardId, daily, rateLabel, noun, empty }
 const perf = { days: 30, data: null,
                sort: { key: 'kickoff', dir: 'desc' },
                filters: { match: '', date: '', population: 'all', gate: 'all',
-                          line: 'all', side: 'all', outcome: 'all' } };
+                          line: 'all', side: 'all', model: 'all', book: 'all',
+                          outcome: 'all' } };
 const P_FILTER_IDS = { match: 'p-match', date: 'p-date', population: 'p-pop',
                        gate: 'p-gate', line: 'p-line', side: 'p-side',
+                       model: 'p-model', book: 'p-book',
                        outcome: 'p-outcome' };
 // filters whose empty state is '' (the rest use the 'all' sentinel)
 const TEXT_FILTERS = new Set(['match', 'date']);
 
 const outcomeOf = (r) => r.model_side_correct == null ? 'push'
   : r.model_side_correct ? 'hit' : 'miss';
+
+/* Probability filter values: 'all', 'ge50'/'lt50' (the headline split), or a
+   percent band 'lo-hi' — half-open [lo, hi) so the bands tile without overlap,
+   except the top band which closes at 100. A row with no probability (e.g. no
+   book price on a model-only game) never matches an active filter — use the
+   population filter to see those rows. */
+function probInBand(p, v) {
+  if (v === 'all') return true;
+  if (p == null) return false;
+  if (v === 'ge50') return p >= 0.5;
+  if (v === 'lt50') return p < 0.5;
+  const [lo, hi] = v.split('-').map(Number);
+  return p >= lo / 100 && (hi === 100 ? p <= 1 : p < hi / 100);
+}
 const isPick = (r) => r.pick != null;
 
 function perfRows() {
@@ -577,7 +593,8 @@ function perfRows() {
 function perfFiltersActive() {
   const f = perf.filters;
   return !!f.match.trim() || !!f.date || f.gate !== 'all' || f.line !== 'all'
-    || f.side !== 'all' || f.outcome !== 'all';
+    || f.side !== 'all' || f.model !== 'all' || f.book !== 'all'
+    || f.outcome !== 'all';
 }
 
 function perfMatches(r) {
@@ -590,6 +607,8 @@ function perfMatches(r) {
   if (f.gate === 'nopicks' && isPick(r)) return false;
   if (f.line !== 'all' && String(r.line) !== f.line) return false;
   if (f.side !== 'all' && r.model_side !== f.side) return false;
+  if (!probInBand(r.model_p_over, f.model)) return false;
+  if (!probInBand(r.book_p_over, f.book)) return false;
   if (f.outcome !== 'all' && outcomeOf(r) !== f.outcome) return false;
   const q = f.match.trim().toLowerCase();
   if (q) {
@@ -771,6 +790,13 @@ function wireSort(hostId, sort, rerender) {
   });
 }
 
+// player leads (it's the sort key); the club tags along muted so newly
+// aliased teams are visible without widening the column for club-only rows
+const teamCell = (player, club) => player == null ? esc(club ?? '—')
+  : club == null ? esc(player)
+  : `${esc(player)} <span style="color:var(--ink3);font-weight:400;"
+       >· ${esc(club)}</span>`;
+
 const thBuilder = (sort) => (key, label, right = false) => {
   const active = sort.key === key;
   const arrow = active ? (sort.dir === 'asc' ? ' ▲' : ' ▼') : '';
@@ -798,9 +824,9 @@ function renderPerfTable(xs) {
         ${localDHM(r.kickoff)}</td>
       <td style="font-weight:600;">${r.population === 'schedule'
         ? '<span title="model-only · league schedule, no book price" style="color:var(--ink3);">◌ </span>'
-        : ''}${esc(r.home_player ?? r.home_club)}
+        : ''}${teamCell(r.home_player, r.home_club)}
         <span style="color:var(--ink3);">v</span>
-        ${esc(r.away_player ?? r.away_club)}</td>
+        ${teamCell(r.away_player, r.away_club)}</td>
       <td class="num r">${r.line}</td>
       <td>${isPick(r)
         ? `${esc(r.model_side)}${r.tier
@@ -910,7 +936,8 @@ function wirePerfFilters() {
   }
   $('p-reset').onclick = () => {
     perf.filters = { match: '', date: '', population: 'all', gate: 'all',
-                     line: 'all', side: 'all', outcome: 'all' };
+                     line: 'all', side: 'all', model: 'all', book: 'all',
+                     outcome: 'all' };
     for (const [key, id] of Object.entries(P_FILTER_IDS)) {
       $(id).value = TEXT_FILTERS.has(key) ? '' : 'all';
     }
@@ -1133,12 +1160,6 @@ function renderX12Table(xs) {
     : `${r.home_ft}–${r.away_ft}`;
   const hda = (r) => [r.p_home, r.p_draw, r.p_away]
     .map((p) => Math.round(p * 100)).join(' / ');
-  // player leads (it's the sort key); the club tags along muted so newly
-  // aliased teams are visible without widening the column for club-only rows
-  const team = (player, club) => player == null ? esc(club ?? '—')
-    : club == null ? esc(player)
-    : `${esc(player)} <span style="color:var(--ink3);font-weight:400;"
-         >· ${esc(club)}</span>`;
   const rows = xs.map((r) => {
     const edge = x12BookP(r) != null ? x12TopP(r) - x12BookP(r) : null;
     return `<tr>
@@ -1146,9 +1167,9 @@ function renderX12Table(xs) {
         ${localDHM(r.kickoff)}</td>
       <td style="font-weight:600;">${r.population === 'schedule'
         ? '<span title="model-only · league schedule, no book price" style="color:var(--ink3);">◌ </span>'
-        : ''}${team(r.home_player, r.home_club)}
+        : ''}${teamCell(r.home_player, r.home_club)}
         <span style="color:var(--ink3);">v</span>
-        ${team(r.away_player, r.away_club)}</td>
+        ${teamCell(r.away_player, r.away_club)}</td>
       <td>${r.pick != null
         ? esc(r.side)
         : `<span class="lean" title="below the 0.50 pick gate — never bet"

@@ -397,6 +397,32 @@
           <option value="over">Leaned over</option>
           <option value="under">Leaned under</option>
         </select>
+        <select id="p-model" aria-label="Filter by model probability of over">
+          <option value="all">Model p(O): any</option>
+          <option value="ge50">Model &#8805; 50%</option>
+          <option value="lt50">Model &lt; 50%</option>
+          <optgroup label="Model bands">
+            <option value="70-100">Model 70%+</option>
+            <option value="60-70">Model 60&#8211;70%</option>
+            <option value="50-60">Model 50&#8211;60%</option>
+            <option value="40-50">Model 40&#8211;50%</option>
+            <option value="30-40">Model 30&#8211;40%</option>
+            <option value="0-30">Model &lt; 30%</option>
+          </optgroup>
+        </select>
+        <select id="p-book" aria-label="Filter by book probability of over">
+          <option value="all">Book p(O): any</option>
+          <option value="ge50">Book &#8805; 50%</option>
+          <option value="lt50">Book &lt; 50%</option>
+          <optgroup label="Book bands">
+            <option value="70-100">Book 70%+</option>
+            <option value="60-70">Book 60&#8211;70%</option>
+            <option value="50-60">Book 50&#8211;60%</option>
+            <option value="40-50">Book 40&#8211;50%</option>
+            <option value="30-40">Book 30&#8211;40%</option>
+            <option value="0-30">Book &lt; 30%</option>
+          </optgroup>
+        </select>
         <select id="p-outcome" aria-label="Filter by outcome">
           <option value="all">Any outcome</option>
           <option value="hit">Hit</option>
