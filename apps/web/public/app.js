@@ -78,10 +78,34 @@ function renderStatus() {
 //           cards for league-scheduled games with no odds yet).
 // 1x2 mode has no tiers (none exist until bands are quantiled on served
 // picks) and no lines, so its chip set is its own.
-const FILTERS_OU = ['all', 'strong', 'solid', 'lean', 'value', 'book'];
-const FILTERS_X12 = ['all', 'picks', 'value', 'book'];
-const FILTER_LABEL = { book: 'BOOK PRICED' };
+const FILTERS_OU = ['all', 'strong', 'solid', 'lean', 'value', 'agree', 'book'];
+const FILTERS_X12 = ['all', 'picks', 'value', 'agree', 'book'];
+const FILTER_LABEL = { book: 'BOOK PRICED', agree: 'AGREE >50%' };
 const filterSet = () => state.x12 ? FILTERS_X12 : FILTERS_OU;
+
+/* 'agree' = model and book are confident about the SAME outcome: the model's
+   top 1x2 outcome clears 50% and the book prices that outcome above 50% too.
+   Two outcomes can't both exceed 50%, so both clearing it IS agreement — no
+   separate same-side check needed. Spans every book-priced fixture; pick
+   gate and value flag don't matter here. */
+function x12Agree(fx) {
+  const x = fx.x12;
+  if (!fx.priced || !x?.book) return false;
+  const side = ['home', 'draw', 'away'].reduce((a, b) =>
+    (x[`p_${a}`] ?? 0) >= (x[`p_${b}`] ?? 0) ? a : b);
+  return (x[`p_${side}`] ?? 0) > 0.5 && (x.book[side] ?? 0) > 0.5;
+}
+
+/* O/U flavour of the same idea, per line: model's heavier side of THIS line
+   clears 50% and the book prices that same side above 50%. (The book's two
+   sides can both sit above 50% with the vig, so the check stays on the
+   model's side only.) */
+function ouAgree(l) {
+  if (!l || l.book_over == null || l.book_under == null) return false;
+  const over = (l.p_over ?? 0) >= (l.p_under ?? 0);
+  return (over ? l.p_over : l.p_under) > 0.5
+    && (over ? l.book_over : l.book_under) > 0.5;
+}
 
 /* With a line selected the card must speak about THAT line, not the model's
    favourite — otherwise filtering to 2.5 would still show you the 4.5 pick. */
@@ -135,6 +159,7 @@ function slateVisible() {
     return state.slate.filter((fx) => {
       if (state.filter === 'picks') return !!fx.x12?.pick;
       if (state.filter === 'value') return !!fx.x12?.value;
+      if (state.filter === 'agree') return x12Agree(fx);
       if (state.filter === 'book') return fx.priced;
       return true;
     });
@@ -147,6 +172,10 @@ function slateVisible() {
     // scope value to the selected line, so the chip and the card agree
     if (state.filter === 'value') {
       return state.line === 'all' ? fx.lines.some((l) => l.value) : h.value;
+    }
+    // same line-scoping as value: ALL LINES means any line agreeing qualifies
+    if (state.filter === 'agree') {
+      return state.line === 'all' ? fx.lines.some(ouAgree) : ouAgree(h);
     }
     return h.tier === state.filter;
   });
@@ -556,8 +585,66 @@ function renderRateChart({ hostId, ttId, cardId, daily, rateLabel, noun, empty }
    Rows the model had no coverage of (model_side null) served the book's own
    price back and are excluded — they carry no model opinion to grade. */
 
+/* ---- pagination (both settled-event tables) ----
+   The size choice persists per table; the index is transient and clamped in
+   pageSlice on every render, so a filter change that shrinks the result set
+   can never strand the view past the last page. */
+const PAGE_SIZES = ['10', '25', '50', '100', 'all'];
+const pagerSize = (key) => {
+  const v = localStorage.getItem(key);
+  return PAGE_SIZES.includes(v) ? v : '25';
+};
+
+function pageSlice(xs, page) {
+  if (page.size === 'all') {
+    page.index = 0;
+    return { rows: xs, pages: 1, start: 0 };
+  }
+  const size = Number(page.size);
+  const pages = Math.max(1, Math.ceil(xs.length / size));
+  page.index = Math.min(Math.max(page.index, 0), pages - 1);
+  const start = page.index * size;
+  return { rows: xs.slice(start, start + size), pages, start };
+}
+
+function pagerHtml(page, pages, total, start, shown) {
+  const opts = PAGE_SIZES.map((s) =>
+    `<option value="${s}"${page.size === s ? ' selected' : ''}>${
+      s === 'all' ? 'All' : s} rows</option>`).join('');
+  return `<div class="pager">
+    <span class="meta num">${start + 1}–${start + shown} of ${total}</span>
+    <select data-pg="size" aria-label="Rows per page">${opts}</select>
+    <span style="margin-left:auto;"></span>
+    <button class="pill" data-pg="prev" ${page.index === 0 ? 'disabled' : ''}
+      >&#8249; PREV</button>
+    <span class="meta num">page ${page.index + 1} of ${pages}</span>
+    <button class="pill" data-pg="next"
+      ${page.index >= pages - 1 ? 'disabled' : ''}>NEXT &#8250;</button>
+  </div>`;
+}
+
+// delegation, like wireSort: the pager is rebuilt with the table on every
+// render, its host container is not
+function wirePager(hostId, page, storeKey, rerender) {
+  const host = $(hostId);
+  host.addEventListener('click', (ev) => {
+    const b = ev.target.closest('button[data-pg]');
+    if (!b || b.disabled) return;
+    page.index += b.dataset.pg === 'next' ? 1 : -1;
+    rerender();
+  });
+  host.addEventListener('input', (ev) => {
+    if (ev.target.dataset?.pg !== 'size') return;
+    page.size = ev.target.value;
+    page.index = 0;
+    localStorage.setItem(storeKey, page.size);
+    rerender();
+  });
+}
+
 const perf = { days: 30, data: null,
                sort: { key: 'kickoff', dir: 'desc' },
+               page: { size: pagerSize('perfRows'), index: 0 },
                filters: { match: '', date: '', population: 'all', gate: 'all',
                           line: 'all', side: 'all', model: 'all', book: 'all',
                           outcome: 'all' } };
@@ -806,6 +893,7 @@ const thBuilder = (sort) => (key, label, right = false) => {
 
 function renderPerfTable(xs) {
   xs = perfSorted(xs);
+  const pg = pageSlice(xs, perf.page);
   const cls = { hit: 'wb-hit', miss: 'wb-miss', push: 'wb-push' };
   const sym = { hit: '✓', miss: '✕', push: '—' };
   // a suppressed row's outcome is hypothetical; a pick's is what happened
@@ -816,7 +904,7 @@ function renderPerfTable(xs) {
   const score = (r) => r.home_ft == null || r.away_ft == null
     ? '<span style="color:var(--ink3);">—</span>'
     : `${r.home_ft}–${r.away_ft}`;
-  const rows = xs.map((r) => {
+  const rows = pg.rows.map((r) => {
     const o = outcomeOf(r);
     const edge = r.book_p_over != null ? r.model_p_over - r.book_p_over : null;
     return `<tr>
@@ -852,7 +940,8 @@ function renderPerfTable(xs) {
       ${th('book', 'Book p(O)', true)}${th('edge', 'Δ pts', true)}
       <th class="r">Score</th>${th('total', 'Total', true)}
       ${th('outcome', 'Outcome')}</tr></thead>
-    <tbody>${rows}</tbody></table>`;
+    <tbody>${rows}</tbody></table>`
+    + pagerHtml(perf.page, pg.pages, xs.length, pg.start, pg.rows.length);
 }
 
 function renderPerf() {
@@ -930,6 +1019,7 @@ function wirePerfFilters() {
   for (const [key, id] of Object.entries(P_FILTER_IDS)) {
     $(id).addEventListener('input', (ev) => {
       perf.filters[key] = ev.target.value;
+      perf.page.index = 0; // a new frame starts on its first page
       syncPerfChrome();
       renderPerf();
     });
@@ -938,6 +1028,7 @@ function wirePerfFilters() {
     perf.filters = { match: '', date: '', population: 'all', gate: 'all',
                      line: 'all', side: 'all', model: 'all', book: 'all',
                      outcome: 'all' };
+    perf.page.index = 0;
     for (const [key, id] of Object.entries(P_FILTER_IDS)) {
       $(id).value = TEXT_FILTERS.has(key) ? '' : 'all';
     }
@@ -971,11 +1062,13 @@ async function loadPerf() {
 
 const X12_OUTCOMES = ['home', 'draw', 'away'];
 const x12perf = { sort: { key: 'kickoff', dir: 'desc' },
+                  page: { size: pagerSize('x12Rows'), index: 0 },
                   filters: { match: '', date: '', club: 'all',
                              population: 'all', gate: 'all', side: 'all',
-                             outcome: 'all' } };
+                             model: 'all', book: 'all', outcome: 'all' } };
 const X_FILTER_IDS = { match: 'x-match', date: 'x-date', club: 'x-club',
                        population: 'x-pop', gate: 'x-gate', side: 'x-side',
+                       model: 'x-model', book: 'x-book',
                        outcome: 'x-outcome' };
 
 const x12PerfRows = () => perf.data?.x12 ?? [];
@@ -992,6 +1085,11 @@ function x12Matches(r) {
   if (f.gate === 'picks' && r.pick == null) return false;
   if (f.gate === 'nopicks' && r.pick != null) return false;
   if (f.side !== 'all' && r.side !== f.side) return false;
+  // same bands as the totals view: model = confidence in its read (top
+  // outcome), book = the book's price for that same read. Model-only rows
+  // have no book price, so an active book filter excludes them.
+  if (!probInBand(x12TopP(r), f.model)) return false;
+  if (!probInBand(x12BookP(r), f.book)) return false;
   if (f.outcome !== 'all') {
     // same four-way split the table's outcome column shows: picked rows are
     // hit/miss, gate-suppressed rows are the hypothetical would-hit/would-miss
@@ -1015,7 +1113,7 @@ function x12FiltersActive() {
   const f = x12perf.filters;
   return !!f.match.trim() || !!f.date || f.club !== 'all'
     || f.population !== 'all' || f.gate !== 'all' || f.side !== 'all'
-    || f.outcome !== 'all';
+    || f.model !== 'all' || f.book !== 'all' || f.outcome !== 'all';
 }
 
 function syncX12Chrome() {
@@ -1049,13 +1147,16 @@ function wireX12Filters() {
   for (const [key, id] of Object.entries(X_FILTER_IDS)) {
     $(id).addEventListener('input', (ev) => {
       x12perf.filters[key] = ev.target.value;
+      x12perf.page.index = 0; // a new frame starts on its first page
       syncX12Chrome();
       renderX12Perf();
     });
   }
   $('x-reset').onclick = () => {
     x12perf.filters = { match: '', date: '', club: 'all', population: 'all',
-                        gate: 'all', side: 'all', outcome: 'all' };
+                        gate: 'all', side: 'all', model: 'all', book: 'all',
+                        outcome: 'all' };
+    x12perf.page.index = 0;
     for (const [key, id] of Object.entries(X_FILTER_IDS)) {
       $(id).value = TEXT_FILTERS.has(key) ? '' : 'all';
     }
@@ -1151,6 +1252,7 @@ const X12_SORT_KEYS = {
 
 function renderX12Table(xs) {
   xs = sortRows(xs, x12perf.sort, X12_SORT_KEYS);
+  const pg = pageSlice(xs, x12perf.page);
   // a suppressed row's outcome is hypothetical; a pick's is what happened
   const label = (r) => r.pick != null
     ? (r.side_correct ? 'hit' : 'miss')
@@ -1160,7 +1262,7 @@ function renderX12Table(xs) {
     : `${r.home_ft}–${r.away_ft}`;
   const hda = (r) => [r.p_home, r.p_draw, r.p_away]
     .map((p) => Math.round(p * 100)).join(' / ');
-  const rows = xs.map((r) => {
+  const rows = pg.rows.map((r) => {
     const edge = x12BookP(r) != null ? x12TopP(r) - x12BookP(r) : null;
     return `<tr>
       <td class="num" style="white-space:nowrap;color:var(--ink2);">
@@ -1193,7 +1295,8 @@ function renderX12Table(xs) {
       ${th('model', 'Model H/D/A', true)}${th('book', 'Book p(read)', true)}
       ${th('edge', 'Δ pts', true)}<th class="r">Score</th>
       ${th('result', 'Result', true)}${th('outcome', 'Outcome')}</tr></thead>
-    <tbody>${rows}</tbody></table>`;
+    <tbody>${rows}</tbody></table>`
+    + pagerHtml(x12perf.page, pg.pages, xs.length, pg.start, pg.rows.length);
 }
 
 function x12Daily(xs) {
@@ -1561,8 +1664,13 @@ $('theme-btn').onclick = () => {
 
 wirePerfFilters();
 wireX12Filters();
-wireSort('perf-table', perf.sort, renderPerf);
-wireSort('x12-table', x12perf.sort, renderX12Perf);
+// re-sorting reorders the whole frame, so the view snaps back to page one
+wireSort('perf-table', perf.sort,
+  () => { perf.page.index = 0; renderPerf(); });
+wireSort('x12-table', x12perf.sort,
+  () => { x12perf.page.index = 0; renderX12Perf(); });
+wirePager('perf-table', perf.page, 'perfRows', renderPerf);
+wirePager('x12-table', x12perf.page, 'x12Rows', renderX12Perf);
 syncX12Btn();
 showTab();
 void refresh();

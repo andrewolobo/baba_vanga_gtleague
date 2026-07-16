@@ -177,6 +177,14 @@
     border-color:var(--ink2); }
   .filters .on { border-color:var(--accent); color:var(--accent); }
 
+  .pager { display:flex; gap:10px; align-items:center; flex-wrap:wrap;
+    margin-top:14px; }
+  .pager select { font-family:'Newsreader',serif; font-size:13px;
+    color:var(--ink); background:var(--surface); border:1px solid var(--line);
+    border-radius:99px; padding:7px 12px; cursor:pointer; }
+  .pager select:focus { outline:none; border-color:var(--ink2); }
+  .pager button.pill[disabled] { opacity:0.35; cursor:default; }
+
   .chart-card { border:1px solid var(--line); border-radius:14px;
     background:var(--surface); padding:20px 22px 12px; position:relative; }
   .chart-card svg { width:100%; height:auto; display:block; }
@@ -514,6 +522,32 @@
             <option value="all">Any read</option>
             <option value="home">Read home</option>
             <option value="away">Read away</option>
+          </select>
+          <select id="x-model" aria-label="Filter by model probability of its read">
+            <option value="all">Model conf: any</option>
+            <option value="ge50">Model &#8805; 50%</option>
+            <option value="lt50">Model &lt; 50%</option>
+            <optgroup label="Model bands">
+              <option value="70-100">Model 70%+</option>
+              <option value="60-70">Model 60&#8211;70%</option>
+              <option value="50-60">Model 50&#8211;60%</option>
+              <option value="40-50">Model 40&#8211;50%</option>
+              <option value="30-40">Model 30&#8211;40%</option>
+              <option value="0-30">Model &lt; 30%</option>
+            </optgroup>
+          </select>
+          <select id="x-book" aria-label="Filter by book probability of the model's read">
+            <option value="all">Book p(read): any</option>
+            <option value="ge50">Book &#8805; 50%</option>
+            <option value="lt50">Book &lt; 50%</option>
+            <optgroup label="Book bands">
+              <option value="70-100">Book 70%+</option>
+              <option value="60-70">Book 60&#8211;70%</option>
+              <option value="50-60">Book 50&#8211;60%</option>
+              <option value="40-50">Book 40&#8211;50%</option>
+              <option value="30-40">Book 30&#8211;40%</option>
+              <option value="0-30">Book &lt; 30%</option>
+            </optgroup>
           </select>
           <select id="x-outcome" aria-label="Filter by outcome">
             <option value="all">Any outcome</option>
