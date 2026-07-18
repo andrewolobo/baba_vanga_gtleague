@@ -114,6 +114,34 @@ def test_vs_book_renders(seeded):  # noqa: F811
     assert "edge coef" not in out
 
 
+def test_book_agreement_classification():
+    """with/against = pick side vs close side; a close inside the coin margin
+    beats both (the book claims no side there)."""
+    import numpy as np
+    from settlement.settle import _book_agreement
+    side = np.array([1, 1, -1, -1, 1, -1])
+    close = np.array([0.60, 0.40, 0.40, 0.60, 0.51, 0.49])
+    assert list(_book_agreement(side, close)) == [
+        "with-book", "against-book", "with-book", "against-book",
+        "book~coin", "book~coin"]
+
+
+def test_vs_book_agreement_section(seeded):  # noqa: F811
+    """The section appears iff the window has picked rows."""
+    conn, db_path = seeded
+    run_cycle(conn, db_path, now=NOW)
+    _play_result(conn, NOW + timedelta(minutes=30))
+    settle_run(conn, db_path, now=LATER)
+
+    conn.execute("UPDATE predictions SET pick = NULL, tier = NULL")
+    assert "picks by book agreement" not in vs_book(conn, days=365, boot=50)
+
+    conn.execute("UPDATE predictions SET pick = 'over', tier = 'lean'")
+    out = vs_book(conn, days=365, boot=50)
+    assert "picks by book agreement" in out
+    assert "book~coin" in out or "with-book" in out or "against-book" in out
+
+
 def test_vs_book_excludes_book_fallback_rows(seeded):  # noqa: F811
     """E2's player is unknown to the model, so its served probs ARE the book's.
     Scoring those against the book would be scoring the book against itself."""
@@ -135,6 +163,22 @@ def test_vs_book_empty_window(seeded):  # noqa: F811
     conn, db_path = seeded
     run_cycle(conn, db_path, now=NOW)
     assert "no settled" in vs_book(conn, days=365, boot=50)
+
+
+def test_vs_book_tag_filter(seeded):  # noqa: F811
+    """--tag keeps only rows whose model_version contains the substring, so a
+    mixed-generation window can be judged on one serving generation alone."""
+    conn, db_path = seeded
+    run_cycle(conn, db_path, now=NOW)
+    _play_result(conn, NOW + timedelta(minutes=30))
+    settle_run(conn, db_path, now=LATER)
+    conn.execute("UPDATE predictions SET model_version ="
+                 " model_version || '-recal2' WHERE line = 3.5")
+
+    out = vs_book(conn, days=365, boot=50, tag="recal2")
+    assert "model vs book: 1 settled predictions" in out
+    assert "tag 'recal2' (1 other-version rows excluded)" in out
+    assert "no settled" in vs_book(conn, days=365, boot=50, tag="no-such-tag")
 
 
 # ── 1x2 vs book ──────────────────────────────────────────────────────────────
@@ -177,6 +221,22 @@ def test_x12_vs_book_needs_a_book_close(seeded, monkeypatch):  # noqa: F811
     assert conn.execute(
         "SELECT COUNT(*) c FROM settlements_x12").fetchone()["c"] >= 1
     assert "no settled" in x12_vs_book(conn, days=365, boot=50)
+
+
+def test_x12_vs_book_tag_filter(seeded, monkeypatch):  # noqa: F811
+    conn, db_path = seeded
+    monkeypatch.setattr(settings(), "x12_enabled", True)
+    _seed_x12_odds(conn, "E1")
+    run_cycle(conn, db_path, now=NOW)
+    _play_result(conn, NOW + timedelta(minutes=30), hf=3, af=2)
+    settle_run(conn, db_path, now=LATER)
+    conn.execute("UPDATE predictions_x12 SET model_version ="
+                 " model_version || '-h2h'")
+
+    out = x12_vs_book(conn, days=365, boot=50, tag="-h2h")
+    assert "1x2 model vs book: 1 settled predictions" in out
+    assert "tag '-h2h' (0 other-version rows excluded)" in out
+    assert "no settled" in x12_vs_book(conn, days=365, boot=50, tag="no-such")
 
 
 # ── schedule-only (gtl:) settlement (docs/POPULATION_SPLIT.md Phase 1) ──────

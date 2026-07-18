@@ -99,6 +99,29 @@ class _Regen:
                                                 self.s.recal_min_n_line,
                                                 population="schedule")
                             if self.s.recal_enabled else {})
+        # One H2HIndex shared by the x12 stackers and the totals pace maps
+        # (docs/TOTALS_H2H.md); built once when either flag needs it.
+        totals_h2h_on = self.s.totals_h2h_enabled and self.s.recal_enabled
+        self._h2h_idx = (h2h.H2HIndex(data.load_matches(conn))
+                         if (self.s.x12_h2h_enabled or totals_h2h_on)
+                         else None)
+        # Pace-extended map sets, fit alongside the plain ones (cheap — same
+        # query rows, one extra fit): '-h2h'-tagged totals rows regen through
+        # these, '-recal'-only rows through the plain set above — regen is
+        # version-aware one level deeper (docs/TOTALS_H2H.md). Flag off ->
+        # None -> tagged rows regen through the plain maps; combined with
+        # RECAL_ENABLED=false they regen through identity — recal's exact
+        # rollback ladder.
+        self._maps_pace: dict[str, dict | None] = {"priced": None,
+                                                   "schedule": None}
+        if totals_h2h_on:
+            self._maps_pace = {
+                pop: recal.fit_line_maps(conn, self.s.recal_days,
+                                         self.s.recal_min_n,
+                                         self.s.recal_min_n_line,
+                                         population=pop,
+                                         h2h_idx=self._h2h_idx)
+                for pop in ("priced", "schedule")}
         # x12 H2H stackers, same contract as the recal maps: refit at settle
         # time per population, applied only to '-h2h'-tagged rows; the hours
         # of drift between predict and settle are the same documented
@@ -106,13 +129,11 @@ class _Regen:
         # (exactly recal's rollback behavior on '-recal' rows).
         self._h2h_stacks: dict[str, object] = {"priced": None, "schedule": None}
         if self.s.x12_h2h_enabled:
-            idx = h2h.H2HIndex(data.load_matches(conn))
             self._h2h_stacks = {
                 pop: h2h.fit_stacker(conn, self.s.x12_h2h_days,
-                                     self.s.x12_h2h_min_n, idx,
+                                     self.s.x12_h2h_min_n, self._h2h_idx,
                                      population=pop, now=now)
                 for pop in ("priced", "schedule")}
-            self._h2h_idx = idx
 
     def _poisson(self, day: str, with_club: bool, with_tod: bool):
         key = (day, with_club, with_tod)
@@ -159,23 +180,38 @@ class _Regen:
         return lam_p
 
     def pick(self, fixture, line: float, model_version: str = "",
-             maps: dict | None = None) -> str | None:
-        """maps selects the population map set (None -> priced, mirroring
-        _line_row; _run_schedule passes the schedule maps). Recal is
-        version-aware like club/tod: '-recal' has tagged exactly the rows a
-        map touched since the population split Phase 0, so an untagged row
-        was served through identity and must regen through identity — a map
-        intercept can flip the side on a near-coin-flip row, which would
-        read as regen disagreement instead of λ dishonesty."""
+             population: str = "priced") -> str | None:
+        """Recal is version-aware like club/tod: '-recal' has tagged exactly
+        the rows a map touched since the population split Phase 0, so an
+        untagged row was served through identity and must regen through
+        identity — a map intercept can flip the side on a near-coin-flip
+        row, which would read as regen disagreement instead of λ dishonesty.
+
+        One level deeper (docs/TOTALS_H2H.md): a '-h2h'-tagged totals row
+        was priced through this population's pace-extended map and regens
+        through the extended set with pace_decay re-derived at kickoff −
+        OFFSET_TOL_MIN (the graded batch's cutoff); a '-recal'-only row
+        regens through the plain set. With the flag off the extended set is
+        None and '-h2h' rows fall back to the plain maps — the rollback
+        ladder."""
         lam = self._lambdas(fixture, model_version)
         if lam is None:
             return None
+        plain = self._maps if population == "priced" else self._maps_sched
+        maps, pace = plain, 0.0
         if "-recal" not in model_version:
             maps = {}
-        elif maps is None:
-            maps = self._maps
+        elif "-h2h" in model_version and self._maps_pace[population] is not None:
+            maps = self._maps_pace[population]
+            kickoff = datetime.fromisoformat(fixture["start_time_utc"])
+            cut = pd.Timestamp(kickoff - timedelta(minutes=OFFSET_TOL_MIN)) \
+                .tz_convert("UTC").tz_localize(None).to_datetime64()
+            pace = self._h2h_idx.features(fixture["home_player"],
+                                          fixture["away_player"],
+                                          cut)["pace_decay"]
         p_over, p_push, _ = totals_probs(lam[0], lam[1], line)
-        p_over, _, p_under = recal.apply_to_line(maps, line, p_over, p_push)
+        p_over, _, p_under = recal.apply_to_line(maps, line, p_over, p_push,
+                                                 pace)
         return "over" if p_over > p_under else "under"
 
     def x12_pick(self, fixture, model_version: str = "",
@@ -420,7 +456,7 @@ def _run_schedule(conn, regen: _Regen, now: datetime, ready: str) -> dict:
         # schedule-population maps, like serving since Phase 2; pick() drops
         # to identity for rows whose served version carries no '-recal' tag
         r_pick = regen.pick(fixture, served["line"], served["model_version"],
-                            maps=regen._maps_sched)
+                            population="schedule")
         with conn:
             conn.execute(
                 "INSERT INTO settlements (event_id, matched_match_id,"
@@ -514,7 +550,8 @@ def scorecard(conn, days: int = 7) -> str:
 # batch is the same one scorecard grades: the last one before kickoff.
 
 _VS_BOOK_QUERY = """
-    SELECT p.line, p.p_over, p.tier, p.value_flag, s.result_total, s.settled_at,
+    SELECT p.line, p.p_over, p.pick, p.tier, p.value_flag, p.model_version,
+           s.result_total, s.settled_at,
            p.lambda_home + p.lambda_away AS lam_total,
            (SELECT o.implied_prob FROM odds_snapshots o
              WHERE o.event_id = s.event_id AND o.market = 'ou'
@@ -545,6 +582,25 @@ _VS_BOOK_QUERY = """
 # a Brier gap we would act on; sets the sample size the command asks for
 _BRIER_RESOLUTION = 0.002
 _PROB_EPS = 1e-6
+
+# a close within this margin of 0.500 is a "coin" line: the book claims no
+# side, so a pick there is the model claiming discrimination the price says
+# doesn't exist — the residual of the pre-recal2 adverse-selection hole
+# (docs/POPULATION_SPLIT.md, gate review 2026-07-18)
+_BOOK_COIN_MARGIN = 0.02
+
+
+def _book_agreement(pick_side, book_over) -> np.ndarray:
+    """Classify picked rows by stance vs the de-vig close.
+
+    pick_side is +1 (over) / -1 (under); returns 'with-book',
+    'against-book', or 'book~coin' per row.
+    """
+    book_over = np.asarray(book_over, dtype=float)
+    book_side = np.where(book_over > 0.5 + _BOOK_COIN_MARGIN, 1,
+                         np.where(book_over < 0.5 - _BOOK_COIN_MARGIN, -1, 0))
+    return np.select([book_side == 0, np.asarray(pick_side) == book_side],
+                     ["book~coin", "with-book"], default="against-book")
 
 
 def _logit(p):
@@ -629,12 +685,19 @@ def _breakdown(df: pd.DataFrame, key: str, fmt=str) -> list[str]:
     return lines
 
 
-def vs_book(conn, days: int = 7, boot: int = 2000, seed: int = 0) -> str:
+def vs_book(conn, days: int = 7, boot: int = 2000, seed: int = 0,
+            tag: str | None = None) -> str:
     since = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
     df = pd.read_sql_query(_VS_BOOK_QUERY, conn, params=(since,))
     df = df.dropna(subset=["book_over", "odds_over", "odds_under"])
+    n_other_version = 0
+    if tag:
+        kept = df["model_version"].str.contains(tag, regex=False)
+        n_other_version = int((~kept).sum())
+        df = df[kept]
     if df.empty:
-        return "no settled, model-covered, book-priced predictions in window"
+        return ("no settled, model-covered, book-priced predictions in window"
+                + (f" with model_version containing '{tag}'" if tag else ""))
     df["y"] = (df["result_total"] > df["line"]).astype(int)
 
     y = df["y"].to_numpy()
@@ -648,7 +711,9 @@ def vs_book(conn, days: int = 7, boot: int = 2000, seed: int = 0) -> str:
 
     out = [f"model vs book: {n} settled predictions in a {days}d window"
            f" | spanning {span_days:.1f}d"
-           f" | lines {df['line'].min()}..{df['line'].max()}"
+           + (f" | tag '{tag}' ({n_other_version} other-version rows excluded)"
+              if tag else "")
+           + f" | lines {df['line'].min()}..{df['line'].max()}"
            f" | base rate over {y.mean():.1%}",
            "",
            f"  {'':<22}{'Brier':>8} {'LogLoss':>9} {'side-hit':>9}",
@@ -666,15 +731,17 @@ def vs_book(conn, days: int = 7, boot: int = 2000, seed: int = 0) -> str:
     lo, hi = _ci(draws)
     verdict = ("model better" if hi < 0 else "book better" if lo > 0
                else "NOT SIGNIFICANT")
-    need = int(np.ceil((1.96 * d.std(ddof=1) / _BRIER_RESOLUTION) ** 2))
-    eta = max(0.0, (need - n) / (n / span_days))
     out += ["",
             f"paired Brier (model - book): {d.mean():+.5f}"
-            f"  95% CI [{lo:+.5f}, {hi:+.5f}]  {verdict}",
-            f"  the book parks each line near a coin flip, so Brier is a weak"
-            f" lens here; resolving",
-            f"  a +/-{_BRIER_RESOLUTION} gap needs ~{need} settled predictions"
-            f" (~{eta:.0f} more days at {n / span_days:.0f}/day)."]
+            f"  95% CI [{lo:+.5f}, {hi:+.5f}]  {verdict}"]
+    if n >= 2:  # a 1-row window has no spread to size the sample from
+        need = int(np.ceil((1.96 * d.std(ddof=1) / _BRIER_RESOLUTION) ** 2))
+        eta = max(0.0, (need - n) / (n / span_days))
+        out += ["  the book parks each line near a coin flip, so Brier is a"
+                " weak lens here; resolving",
+                f"  a +/-{_BRIER_RESOLUTION} gap needs ~{need} settled"
+                f" predictions (~{eta:.0f} more days at"
+                f" {n / span_days:.0f}/day)."]
 
     if 0 < y.sum() < n:
         e = _edge_coefs(model, book, y, boot, rng)
@@ -703,6 +770,20 @@ def vs_book(conn, days: int = 7, boot: int = 2000, seed: int = 0) -> str:
     out += ["", "by tier"] + _breakdown(df, "tier")
     out += ["", "by value flag"] + _breakdown(
         df, "value_flag", fmt=lambda v: "value" if v else "no value")
+
+    picked = df[df["pick"].notna()].copy()
+    if len(picked):
+        side = np.where(picked["pick"].to_numpy() == "over", 1, -1)
+        picked["agreement"] = _book_agreement(side, picked["book_over"].to_numpy())
+        out += ["", "picks by book agreement"]
+        out += _breakdown(picked, "agreement")
+        out += [f"  (book~coin = close within +/-{_BOOK_COIN_MARGIN} of 0.500."
+                " The pre-recal2 adverse-selection hole lived in picks that"
+                " fight the price;",
+                "  a book~coin bucket persistently under 50% at n~100+ argues"
+                " for a coin-zone pick guard -- docs/POPULATION_SPLIT.md"
+                " Phase 4.)"]
+
     out += ["", "roi = flat 1u on the model's side at the closing price,"
             " every row (not just picks)"]
     return "\n".join(out)
@@ -796,13 +877,20 @@ def _x12_breakdown(df: pd.DataFrame, key: str, fmt=str) -> list[str]:
     return lines
 
 
-def x12_vs_book(conn, days: int = 7, boot: int = 2000, seed: int = 0) -> str:
+def x12_vs_book(conn, days: int = 7, boot: int = 2000, seed: int = 0,
+                tag: str | None = None) -> str:
     since = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
     df = pd.read_sql_query(_X12_VS_BOOK_QUERY, conn, params=(since,))
     n_settled = len(df)
     df = df.dropna(subset=_X12_BOOK_COLS)
+    n_other_version = 0
+    if tag:
+        kept = df["model_version"].str.contains(tag, regex=False)
+        n_other_version = int((~kept).sum())
+        df = df[kept]
     if df.empty:
-        return "no settled 1x2 predictions with a book close in window"
+        return ("no settled 1x2 predictions with a book close in window"
+                + (f" with model_version containing '{tag}'" if tag else ""))
     df = _x12_row_scores(df)
 
     n = len(df)
@@ -817,8 +905,11 @@ def x12_vs_book(conn, days: int = 7, boot: int = 2000, seed: int = 0) -> str:
 
     out = [f"1x2 model vs book: {n} settled predictions in a {days}d window"
            f" | spanning {span_days:.1f}d"
-           f" | {n_settled - n} settled without a 1x2 close (excluded)"
-           f" | outcomes h/d/a {shares[0]:.1%}/{shares[1]:.1%}/{shares[2]:.1%}",
+           f" | {n_settled - n - n_other_version} settled without a 1x2 close"
+           f" (excluded)"
+           + (f" | tag '{tag}' ({n_other_version} other-version rows excluded)"
+              if tag else "")
+           + f" | outcomes h/d/a {shares[0]:.1%}/{shares[1]:.1%}/{shares[2]:.1%}",
            "",
            f"  {'':<22}{'Brier(3)':>9} {'LogLoss':>9} {'argmax-hit':>11}",
            f"  {'model (as served)':<22}{df['mb'].mean():>9.4f}"
@@ -1013,6 +1104,11 @@ def main(argv=None) -> int:
     ap.add_argument("--boot", type=int, default=2000,
                     help="bootstrap resamples for vs-book confidence intervals")
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--tag", default=None,
+                    help="vs-book/x12-vs-book: keep only rows whose"
+                         " model_version contains this substring (e.g."
+                         " 'recal2' for the clean-generation read; pass"
+                         " '--tag=-recal2' if you want the leading dash)")
     args = ap.parse_args(argv)
     s = settings()
     db_path = Path(args.db) if args.db else s.gtl_db_path
@@ -1035,10 +1131,10 @@ def main(argv=None) -> int:
             return 2
         return 0
     if args.cmd == "vs-book":
-        print(vs_book(conn, args.days, args.boot, args.seed))
+        print(vs_book(conn, args.days, args.boot, args.seed, args.tag))
         return 0
     if args.cmd == "x12-vs-book":
-        print(x12_vs_book(conn, args.days, args.boot, args.seed))
+        print(x12_vs_book(conn, args.days, args.boot, args.seed, args.tag))
         return 0
     if args.cmd == "tiers":
         print(tier_bands(conn, args.days))

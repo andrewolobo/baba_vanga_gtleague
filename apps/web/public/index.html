@@ -12,11 +12,18 @@
     --bg:#faf6ef; --bg2:#f2ece1; --surface:#fffdf8; --ink:#221d17; --ink2:#6d6559;
     --ink3:#9d9484; --line:#e7dfd1; --accent:#e2542a; --accentSoft:#fbe7dd;
     --good:#3f9b6a; --bad:#cf4a3e; --gold:#b98a2c;
+    /* hit/miss series pair — CVD-validated against the light surface
+       (deutan ΔE 16.8); NOT the same as --good/--bad, whose pairing fails
+       red-green separation when used as two lines on one chart */
+    --chartHit:#3f9b6a; --chartMiss:#8f2f26;
   }
   [data-theme="dark"] {
     --bg:#151210; --bg2:#1d1914; --surface:#211c17; --ink:#f3ede2; --ink2:#a99f8f;
     --ink3:#78705f; --line:#332d24; --accent:#f5713f; --accentSoft:#3a251b;
     --good:#57ba86; --bad:#e26c60; --gold:#dcaf4f;
+    /* re-validated for the dark surface (deutan ΔE 12.8) — dark mode gets
+       its own steps, not a flip of the light pair */
+    --chartHit:#49a876; --chartMiss:#b04237;
   }
   * { box-sizing:border-box; }
   body { margin:0; background:var(--bg); color:var(--ink);
@@ -202,6 +209,8 @@
   .chart-tooltip .tt-key { width:14px; height:0; border-top:3px solid var(--accent);
     border-radius:2px; }
   .chart-tooltip .tt-key.vol { border-top-color:var(--ink2); }
+  .chart-tooltip .tt-key.hit { border-top-color:var(--chartHit); }
+  .chart-tooltip .tt-key.miss { border-top-color:var(--chartMiss); }
   .chart-tooltip .tt-val { font-weight:700; font-variant-numeric:tabular-nums; }
   .chart-tooltip .tt-lbl { color:var(--ink2); font-size:11.5px; }
   /* The no-picks tab reports counterfactuals. Bank the caveat into the page
@@ -292,8 +301,9 @@
       <div class="meta" style="margin-bottom:10px;">MODEL-ONLY · league schedule,
         no book price — informational picks, not bettable</div>
       <div class="tiles" id="tiles-schedule"></div>
-      <div class="meta" style="margin:20px 0 10px;">BOOK-PRICED · picks are rare
-        by design — the model defers to the price unless it has proven edge</div>
+      <div class="meta" style="margin:20px 0 10px;">BOOK-PRICED · few picks by
+        construction — the model defers to the price unless its calibrated
+        confidence clears the gate</div>
       <div class="tiles" id="tiles-priced"></div>
       <div style="margin-top:18px;display:grid;grid-template-columns:1fr 1fr;
         gap:0 48px;">
@@ -444,9 +454,11 @@
 
     <section>
       <div class="sect-head">
-        <h3>Performance over time</h3>
-        <span class="meta">daily hit rate on the model's leaned side ·
-          kickoff date (local) · follows the filters above</span>
+        <h3>Hit &amp; miss rates</h3>
+        <span class="meta">the current week, day by day — pick a date in the
+          filters above to see that single day hour by hour (local) · rates
+          over gradable rows, pushes counted separately · follows the
+          filters above</span>
       </div>
       <div class="chart-card" id="perf-chart-card">
         <div id="perf-chart"></div>
@@ -563,10 +575,11 @@
 
       <section>
         <div class="sect-head">
-          <h3>1x2 over time</h3>
-          <span class="meta">daily hit rate on the model's top outcome ·
-            kickoff date (local) · judge picked rows against the walk-forward
-            59% only after a few hundred graded picks</span>
+          <h3>1x2 hit &amp; miss</h3>
+          <span class="meta">the current week, day by day — pick a date in the
+            filters above to see that single day hour by hour (local) ·
+            graded on the model's top outcome · judge picked rows against the
+            walk-forward 59% only after a few hundred graded picks</span>
         </div>
         <div class="chart-card" id="x12-chart-card">
           <div id="x12-chart"></div>

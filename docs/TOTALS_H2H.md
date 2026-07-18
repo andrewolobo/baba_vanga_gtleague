@@ -1,6 +1,20 @@
 # Totals H2H (pair pace) — serving build plan (2026-07-15)
 
-Status: **PLAN, no code yet.** The measurement is DONE and PASSED
+Status: **BUILT 2026-07-18, dark (flag off, serving byte-identical).**
+Phases 1–2 landed as speced: recal.py fit/apply pace column +
+`fit_line_maps(h2h_idx=)`, cycle/settle wiring, `-recal2-h2h` tag,
+version-aware regen, `TOTALS_H2H_ENABLED` (requires recal). 11 new tests
+(test_recal.py + test_predictor_totals_h2h.py), full suite green. Dry run
+on a prod DB copy (07-18): row sets identical, max |Δp_push| = 0.0, tags
+only on engaged-line covered rows, fitted priced c = 0.37–0.75 / schedule
+c = 0.51–0.90, no sign flips (watch: schedule 2.5 extended a went slightly
+negative, −0.58 — thin line). The optional conditional pace arm was built
+first and RUN 2026-07-18: **c ≈ 0.6 holds under line-conditioning**
+(+1.9/+2.6/+4.3 AUC pts at 3.5/4.5/5.5 over the recal arm; 6.5 noise) —
+recorded in `model_runs` kind `conditional`. Enabling remains a separate
+decision per §Enabling below. Original plan status follows.
+
+The measurement is DONE and PASSED
 ([H2H_FEATURE.md](H2H_FEATURE.md) §Totals impact + the recorded 90-day run,
 `model_runs` kind `h2h`, 2026-07-13): pair pace is worth **+0.8…+1.3 AUC
 pts per line** with Brier improving everywhere, the non-pairwise

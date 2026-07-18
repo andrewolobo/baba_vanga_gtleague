@@ -104,18 +104,29 @@ def _row_version(version: str, maps, line) -> str:
     were priced through maps fit on served p_over — the closed loop
     docs/RECAL_SERVING.md 2026-07-13 documents. Settlement regen matches
     on the '-recal' substring, so both generations regen through the
-    current maps; analytics can split generations on the exact tag."""
-    return version + ("-recal2" if float(line) in maps else "")
+    current maps; analytics can split generations on the exact tag.
+
+    A pace-extended (a, b, c) map tags '-recal2-h2h' (docs/TOTALS_H2H.md):
+    the meaning of the map changed, so the tag changed — and regen routes
+    the extended shape on the '-h2h' substring one level deeper."""
+    ab = maps.get(float(line))
+    if ab is None:
+        return version
+    return version + ("-recal2-h2h" if len(ab) == 3 else "-recal2")
 
 
 def _line_row(f, line, sels, lam_h, lam_a, now, cutoff, version, s,
-              maps) -> PredictionRow:
+              maps, pace: float = 0.0) -> PredictionRow:
+    """`pace` is the pair's pace_decay at the ROW'S OWN cutoff (not kickoff —
+    pairs rematch between an early batch and kickoff; the x12 rule). Consumed
+    only by pace-extended maps (docs/TOTALS_H2H.md); a plain map ignores it."""
     book_over, book_under = sels["over"][1], sels["under"][1]
     covered = lam_h is not None
 
     if covered:
         p_over, p_push, p_under = totals_probs(lam_h, lam_a, line)
-        p_over, p_push, p_under = recal.apply_to_line(maps, line, p_over, p_push)
+        p_over, p_push, p_under = recal.apply_to_line(maps, line, p_over,
+                                                      p_push, pace)
         source = s.totals_source
         version = _row_version(version, maps, line)
     else:  # book fallback: no pick without model coverage
@@ -204,17 +215,30 @@ SCHEDULE_PREFIX = "gtl:"  # predictions for league-scheduled games without odds
 SCHEDULE_LINES_AROUND = (-0.5, +0.5)  # canonical half-lines straddling E[total]
 
 
+def _pace_at(h2h_idx, f, cutoff) -> float:
+    """The pair's pace_decay at a fixture's own cutoff, 0.0 without an index
+    (flag off) — the value _line_row/_schedule_row hand to apply_to_line."""
+    if h2h_idx is None:
+        return 0.0
+    cut64 = pd.Timestamp(cutoff).tz_convert("UTC").tz_localize(None) \
+        .to_datetime64()
+    return h2h_idx.features(f["home_player"], f["away_player"],
+                            cut64)["pace_decay"]
+
+
 def _schedule_row(f, line, lam_h, lam_a, now, cutoff, version, s,
-                  maps) -> PredictionRow:
+                  maps, pace: float = 0.0) -> PredictionRow:
     """Model-only prediction: same confidence scale as a priced row, but
     value_flag stays false (value needs a price to beat).
 
     `maps` must be this population's own maps — never the priced-population
     fit. The two populations do not share a calibration curve (priced
     a ≈ 0.14 vs schedule a ≈ 1.30, docs/POPULATION_SPLIT.md); priced maps
-    applied here would suppress the model's best picks."""
+    applied here would suppress the model's best picks. `pace` as in
+    _line_row: the pair's pace_decay at the row's own cutoff."""
     p_over, p_push, p_under = totals_probs(lam_h, lam_a, line)
-    p_over, p_push, p_under = recal.apply_to_line(maps, line, p_over, p_push)
+    p_over, p_push, p_under = recal.apply_to_line(maps, line, p_over,
+                                                  p_push, pace)
     version = _row_version(version, maps, line)
     sel = "over" if p_over > p_under else "under"
     confidence = round(p_over if sel == "over" else p_under, 6)
@@ -284,29 +308,40 @@ def run_cycle(conn, db_path, now: datetime | None = None) -> dict:
     fallback = float(recent["home_ft"].add(recent["away_ft"]).mean() / 2) \
         if len(recent) else float("nan")
 
+    # One H2HIndex serves both heads (features are cutoff-addressed): the
+    # x12 stackers (docs/H2H_FEATURE.md) and the totals pace maps
+    # (docs/TOTALS_H2H.md). totals_h2h requires recal — the pace term rides
+    # the recal map, so RECAL_ENABLED=false overrides the flag.
+    x12_h2h_on = s.x12_enabled and s.x12_h2h_enabled
+    totals_h2h_on = s.totals_h2h_enabled and s.recal_enabled
+    h2h_idx = h2h_stack = h2h_stack_sched = None
+    if x12_h2h_on or totals_h2h_on:
+        h2h_idx = h2h.H2HIndex(df)
+
     # per-line Platt maps from settled predictions; {} (identity) until a
     # line accrues recal_min_n graded samples — or recal_min_n_line for the
     # shared-slope hierarchical tier. See docs/RECAL_SERVING.md.
     # Fit per population, never pooled (docs/POPULATION_SPLIT.md: priced
     # a ≈ 0.14 vs schedule a ≈ 1.30 — no shared calibration curve). Same
     # knobs for both; the schedule pool accrues ~3× faster so it engages
-    # sooner on its own.
+    # sooner on its own. With totals_h2h on, every engaged line fits the
+    # pace-extended (a, b, c) shape — one map set per population, no
+    # plain/extended mixture inside one (docs/TOTALS_H2H.md).
+    totals_idx = h2h_idx if totals_h2h_on else None
     maps = (recal.fit_line_maps(conn, s.recal_days, s.recal_min_n,
-                                s.recal_min_n_line, now=now)
+                                s.recal_min_n_line, now=now,
+                                h2h_idx=totals_idx)
             if s.recal_enabled else {})
     maps_sched = (recal.fit_line_maps(conn, s.recal_days, s.recal_min_n,
                                       s.recal_min_n_line, now=now,
-                                      population="schedule")
+                                      population="schedule",
+                                      h2h_idx=totals_idx)
                   if s.recal_enabled else {})
 
     # H2H stacker on the 1x2 head (docs/H2H_FEATURE.md). Per population,
     # never pooled; None (identity, no '-h2h' tag) until a population has
-    # x12_h2h_min_n decisive graded rows. The index is built from the full
-    # match frame — features are cutoff-addressed, so one index serves every
-    # fixture in the slate.
-    h2h_idx = h2h_stack = h2h_stack_sched = None
-    if s.x12_enabled and s.x12_h2h_enabled:
-        h2h_idx = h2h.H2HIndex(df)
+    # x12_h2h_min_n decisive graded rows.
+    if x12_h2h_on:
         h2h_stack = h2h.fit_stacker(conn, s.x12_h2h_days, s.x12_h2h_min_n,
                                     h2h_idx, now=now)
         h2h_stack_sched = h2h.fit_stacker(conn, s.x12_h2h_days,
@@ -337,12 +372,13 @@ def run_cycle(conn, db_path, now: datetime | None = None) -> dict:
         # as-of guard: form may only see results published before the cutoff
         cutoff = min(now, kickoff - timedelta(minutes=OFFSET_TOL_MIN))
         lam_h, lam_a = _fixture_lambdas(f, pm, form_idx, fallback, cutoff, s)
+        pace = _pace_at(totals_idx, f, cutoff)
 
         for line, sels in sorted(ev_odds["ou"].items()):
             if "over" not in sels or "under" not in sels:
                 continue
             row = _line_row(f, line, sels, lam_h, lam_a, now, cutoff, version,
-                            s, maps)
+                            s, maps, pace)
             out.append(row)
             slate.append((f, line, row.pick, row.tier, row.p_over))
 
@@ -364,9 +400,10 @@ def run_cycle(conn, db_path, now: datetime | None = None) -> dict:
         if lam_h is None:
             continue  # no model coverage and no odds -> nothing to say
         base = max(1.0, round(lam_h + lam_a))
+        pace = _pace_at(totals_idx, f, cutoff)
         for dl in SCHEDULE_LINES_AROUND:
             row = _schedule_row(f, base + dl, lam_h, lam_a, now, cutoff,
-                                version, s, maps_sched)
+                                version, s, maps_sched, pace)
             out.append(row)
             slate.append((f, row.line, row.pick, row.tier, row.p_over))
         if s.x12_enabled:  # no book 1x2 here -> value_flag stays False
@@ -384,6 +421,12 @@ def run_cycle(conn, db_path, now: datetime | None = None) -> dict:
     return {"fixtures": len(fixtures), "scheduled": len(scheduled), "rows": n,
             "x12_rows": n_x12, "recal_lines": sorted(maps),
             "recal_lines_sched": sorted(maps_sched),
+            # lines whose engaged map carries the pace term (3-param fit);
+            # [] when totals_h2h is off or a population is below engagement
+            "recal_pace_lines": sorted(li for li, ab in maps.items()
+                                       if len(ab) == 3),
+            "recal_pace_lines_sched": sorted(li for li, ab in maps_sched.items()
+                                             if len(ab) == 3),
             # n_fit per engaged population; 0 = identity (below min_n or off)
             "x12_h2h_n": {"priced": h2h_stack.n_fit if h2h_stack else 0,
                           "schedule": (h2h_stack_sched.n_fit
@@ -405,6 +448,8 @@ def main(argv=None) -> int:
           f"prediction_rows={rep['rows']} x12_rows={rep.get('x12_rows', 0)} "
           f"recal_lines={rep.get('recal_lines', [])} "
           f"recal_lines_sched={rep.get('recal_lines_sched', [])} "
+          f"pace_lines={rep.get('recal_pace_lines', [])} "
+          f"pace_lines_sched={rep.get('recal_pace_lines_sched', [])} "
           f"x12_h2h_n={rep.get('x12_h2h_n', {})} "
           f"elapsed={rep['elapsed_s']}s")
     if rep.get("unresolved_clubs"):

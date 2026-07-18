@@ -307,7 +307,10 @@ function renderSlate() {
 
 /* Two prediction populations, reported separately and never pooled
    (docs/POPULATION_SPLIT.md): model-only (schedule) picks are the product's
-   real signal; book-priced picks are rare by design once recal saturates. */
+   real signal; book-priced picks are few by construction — the per-population
+   map passes only calibrated-honest ones (~10% of rows, gate review
+   2026-07-18), and they are not bettable signal until the Phase 4 edge
+   gate clears. */
 const tilesHtml = (tiles) => tiles.map(([k, v, cls]) =>
   `<div class="tile ${cls}"><div class="v num">${v}</div>
    <div class="k">${k}</div></div>`).join('');
@@ -460,27 +463,82 @@ function renderSettled() {
        settlements appear ~45 minutes after each predicted kickoff.</div>`;
 }
 
-/* ---------- rate chart (shared) ---------- */
+/* ---------- hit/miss chart (shared) ---------- */
 
 const RANGES = [[7, '7D'], [30, '30D'], [90, '90D'], [365, 'ALL']];
 
-/* Two stacked panels, one shared x — never a dual axis: rate line on its own
-   0–100% scale, volume as columns on its own count scale.
+/* One frame, two granularities: a selected kickoff date charts that day hour
+   by hour (local); no date selection charts the current local week, Monday
+   through Sunday. Both domains are FIXED — a quiet hour or day stays an
+   honest gap on the axis instead of collapsing out of it. `correctOf` picks
+   the grade column; null (a push) never enters the rates. */
+function hitMissFrame(xs, dateSel, correctOf) {
+  const mk = (label) => ({ label, graded: 0, hits: 0, pushes: 0 });
+  let mode, title, buckets;
+  if (dateSel) {
+    mode = 'day';
+    title = `${dateSel} · BY HOUR · ${TZ_LABEL}`;
+    buckets = Array.from({ length: 24 },
+      (_, h) => mk(`${String(h).padStart(2, '0')}:00`));
+    // xs is already scoped to dateSel by the date filter upstream
+    for (const r of xs) {
+      const b = buckets[new Date(r.kickoff).getHours()];
+      const c = correctOf(r);
+      if (c == null) b.pushes += 1;
+      else { b.graded += 1; b.hits += c; }
+    }
+  } else {
+    mode = 'week';
+    const mon = new Date(); mon.setHours(0, 0, 0, 0);
+    mon.setDate(mon.getDate() - (mon.getDay() + 6) % 7); // back to Monday
+    buckets = [];
+    const byKey = new Map();
+    for (let i = 0; i < 7; i++) {
+      const d = new Date(mon); d.setDate(mon.getDate() + i);
+      const key = d.toLocaleDateString('en-CA');
+      const b = mk(`${d.toLocaleDateString('en-GB', { weekday: 'short' })
+        } ${key.slice(5)}`);
+      buckets.push(b); byKey.set(key, b);
+    }
+    const keys = [...byKey.keys()];
+    title = `THIS WEEK · ${keys[0]} → ${keys[6]} · DAILY`;
+    for (const r of xs) {
+      const b = byKey.get(localDay(r.kickoff)); // rows outside the week drop
+      if (!b) continue;
+      const c = correctOf(r);
+      if (c == null) b.pushes += 1;
+      else { b.graded += 1; b.hits += c; }
+    }
+  }
+  for (const b of buckets) {
+    b.misses = b.graded - b.hits;
+    b.hit_rate = b.graded ? b.hits / b.graded : null;
+    b.miss_rate = b.graded ? b.misses / b.graded : null;
+  }
+  return { mode, title, buckets };
+}
 
-   daily rows are { date, graded, hits, hit_rate }; `noun` names what `graded`
-   counts, since the no-picks tab plots would-be results rather than picks. */
-function renderRateChart({ hostId, ttId, cardId, daily, rateLabel, noun, empty }) {
+/* Two stacked panels, one shared x — never a dual axis: hit and miss rate
+   lines on one 0–100% scale, volume as columns on its own count scale.
+   `noun` names what `graded` counts, since suppressed rows chart would-be
+   results rather than picks. */
+function renderHitMissChart({ hostId, ttId, cardId, frame, noun }) {
   const host = $(hostId);
-  if (daily.length < 2) {
-    host.innerHTML = `<div class="empty">${empty}</div>`;
+  const { buckets } = frame;
+  const n = buckets.length;
+  if (!buckets.some((b) => b.graded)) {
+    host.innerHTML = `<div class="empty">${frame.mode === 'day'
+      ? `no gradable ${noun} on this date — pick another date or loosen the
+         filters above.`
+      : `nothing gradable this week yet — the week view fills in as events
+         settle.`}</div>`;
     return;
   }
-  const W = 1000, H = 340, L = 46, R = 16;
+  const W = 1000, H = 340, L = 46, R = 56;
   const rateTop = 26, rateBot = 200, volTop = 240, volBot = 306, xLabY = 330;
-  const n = daily.length;
   const x = (i) => L + (i + 0.5) * ((W - L - R) / n);
   const yRate = (v) => rateBot - v * (rateBot - rateTop);
-  const maxVol = Math.max(...daily.map((d) => d.graded));
+  const maxVol = Math.max(...buckets.map((b) => b.graded));
   const yVol = (v) => volBot - (v / maxVol) * (volBot - volTop);
 
   let s = '';
@@ -492,43 +550,83 @@ function renderRateChart({ hostId, ttId, cardId, daily, rateLabel, noun, empty }
            fill="var(--ink3)" style="font-variant-numeric:tabular-nums;">${g * 100}</text>`;
   }
   s += `<text x="${L}" y="14" class="panel-label" font-size="10.5"
-         fill="var(--ink2)" letter-spacing="1.5">${rateLabel}</text>
+         fill="var(--ink2)" letter-spacing="1.5">${frame.title} · %</text>
         <text x="${L}" y="${volTop - 8}" font-size="10.5" fill="var(--ink2)"
          letter-spacing="1.5">${noun.toUpperCase()} · max ${maxVol}</text>`;
+  // legend: swatches carry identity, text stays in ink tokens
+  s += `<line x1="${W - R - 120}" x2="${W - R - 106}" y1="10" y2="10"
+         stroke="var(--chartHit)" stroke-width="3" stroke-linecap="round"/>
+        <text x="${W - R - 100}" y="14" font-size="10.5" fill="var(--ink2)"
+         letter-spacing="1.5">HIT</text>
+        <line x1="${W - R - 62}" x2="${W - R - 48}" y1="10" y2="10"
+         stroke="var(--chartMiss)" stroke-width="3" stroke-linecap="round"/>
+        <text x="${W - R - 42}" y="14" font-size="10.5" fill="var(--ink2)"
+         letter-spacing="1.5">MISS</text>`;
 
   // volume columns: thin, rounded data-end, square baseline, surface gaps by slot
   const slot = (W - L - R) / n;
   const bw = Math.min(24, Math.max(3, slot * 0.55));
   for (let i = 0; i < n; i++) {
-    const h = volBot - yVol(daily[i].graded);
+    if (!buckets[i].graded) continue;
+    const h = volBot - yVol(buckets[i].graded);
     s += `<path d="M ${x(i) - bw / 2} ${volBot}
            v ${-Math.max(0, h - 4)} q 0 -4 4 -4 h ${bw - 8} q 4 0 4 4
            v ${Math.max(0, h - 4)} z" fill="var(--ink2)"/>`;
   }
-  // rate line: 2px round, markers with 2px surface ring
-  const pts = daily.map((d, i) => `${x(i)},${yRate(d.hit_rate)}`);
-  s += `<polyline points="${pts.join(' ')}" fill="none" stroke="var(--accent)"
-         stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>`;
-  for (let i = 0; i < n; i++) {
-    s += `<circle cx="${x(i)}" cy="${yRate(daily[i].hit_rate)}" r="4.5"
-           fill="var(--accent)" stroke="var(--surface)" stroke-width="2"/>`;
+
+  // contiguous stretches with data, so lines break honestly across empty
+  // hours/days instead of bridging them
+  const runs = [];
+  let cur = [];
+  buckets.forEach((b, i) => {
+    if (b.graded) cur.push(i);
+    else if (cur.length) { runs.push(cur); cur = []; }
+  });
+  if (cur.length) runs.push(cur);
+
+  // rate lines: 2px round, markers with 2px surface ring; hit drawn last so
+  // it sits on top where the two cross
+  for (const [rateKey, color] of [['miss_rate', 'var(--chartMiss)'],
+                                  ['hit_rate', 'var(--chartHit)']]) {
+    for (const run of runs) {
+      s += `<polyline points="${run.map((i) =>
+             `${x(i)},${yRate(buckets[i][rateKey])}`).join(' ')}" fill="none"
+             stroke="${color}" stroke-width="2" stroke-linejoin="round"
+             stroke-linecap="round"/>`;
+      for (const i of run) {
+        s += `<circle cx="${x(i)}" cy="${yRate(buckets[i][rateKey])}" r="4.5"
+               fill="${color}" stroke="var(--surface)" stroke-width="2"/>`;
+      }
+    }
   }
-  // selective direct label: endpoint only (text token, not series color)
-  const last = daily[n - 1];
-  s += `<text x="${x(n - 1) + 9}" y="${yRate(last.hit_rate) + 4}" font-size="12.5"
-         font-weight="700" fill="var(--ink)"
-         style="font-variant-numeric:tabular-nums;">${Math.round(last.hit_rate * 100)}%</text>`;
-  // x labels: every ~8th
-  const step = Math.max(1, Math.ceil(n / 8));
+  // selective direct labels: last bucket with data only (text token, not
+  // series color); complementary rates can meet at 50/50, so dodge overlap
+  const li = runs[runs.length - 1][runs[runs.length - 1].length - 1];
+  const lb = buckets[li];
+  let yH = yRate(lb.hit_rate) + 4, yM = yRate(lb.miss_rate) + 4;
+  if (Math.abs(yH - yM) < 15) {
+    const mid = (yH + yM) / 2, sign = yH <= yM ? 1 : -1;
+    yH = mid - sign * 7.5; yM = mid + sign * 7.5;
+  }
+  s += `<text x="${x(li) + 9}" y="${yH}" font-size="12.5" font-weight="700"
+         fill="var(--ink)" style="font-variant-numeric:tabular-nums;"
+        >${Math.round(lb.hit_rate * 100)}%</text>
+        <text x="${x(li) + 9}" y="${yM}" font-size="12.5" font-weight="700"
+         fill="var(--ink)" style="font-variant-numeric:tabular-nums;"
+        >${Math.round(lb.miss_rate * 100)}%</text>`;
+  // x labels: every 3rd hour in day mode, every day in week mode
+  const step = frame.mode === 'day' ? 3 : 1;
   for (let i = 0; i < n; i += step) {
     s += `<text x="${x(i)}" y="${xLabY}" text-anchor="middle" font-size="11"
-           fill="var(--ink3)">${daily[i].date.slice(5)}</text>`;
+           fill="var(--ink3)">${frame.mode === 'day'
+             ? buckets[i].label.slice(0, 2) : buckets[i].label}</text>`;
   }
   s += `<line id="xhair" x1="0" x2="0" y1="${rateTop}" y2="${volBot}"
          stroke="var(--ink3)" stroke-width="1" visibility="hidden"/>`;
 
   host.innerHTML = `<svg viewBox="0 0 ${W} ${H}" role="img"
-    aria-label="Daily hit rate and graded pick volume">${s}</svg>`;
+    aria-label="Hit and miss rates ${frame.mode === 'day'
+      ? 'by hour of the selected day' : 'by day of the current week'}">${s}</svg>`;
 
   // crosshair + one tooltip for both panels; whole-slot hit target
   const svg = host.querySelector('svg');
@@ -537,10 +635,10 @@ function renderRateChart({ hostId, ttId, cardId, daily, rateLabel, noun, empty }
   const show = (i, clientX, clientY) => {
     xhair.setAttribute('x1', x(i)); xhair.setAttribute('x2', x(i));
     xhair.setAttribute('visibility', 'visible');
-    const d = daily[i];
+    const b = buckets[i];
     tt.replaceChildren();
     const date = document.createElement('div');
-    date.className = 'tt-date'; date.textContent = d.date;
+    date.className = 'tt-date'; date.textContent = b.label;
     tt.appendChild(date);
     const row = (key, val, lbl) => {
       const r = document.createElement('div'); r.className = 'tt-row';
@@ -551,8 +649,16 @@ function renderRateChart({ hostId, ttId, cardId, daily, rateLabel, noun, empty }
       l.textContent = lbl;
       r.append(k, v, l); tt.appendChild(r);
     };
-    row('', `${Math.round(d.hit_rate * 100)}%`, `hit rate (${d.hits}/${d.graded})`);
-    row('vol', String(d.graded), noun);
+    if (b.graded) {
+      row('hit', `${Math.round(b.hit_rate * 100)}%`,
+          `hit (${b.hits}/${b.graded})`);
+      row('miss', `${Math.round(b.miss_rate * 100)}%`,
+          `miss (${b.misses}/${b.graded})`);
+      row('vol', String(b.graded), noun);
+    } else {
+      row('vol', '0', `${noun} — nothing gradable`);
+    }
+    if (b.pushes) row('vol', String(b.pushes), 'ungradable (push)');
     tt.style.display = 'block';
     const card = $(cardId).getBoundingClientRect();
     const ttW = tt.offsetWidth;
@@ -814,22 +920,6 @@ function renderPerfBreakdowns(xs) {
   ], 'nothing in scope.');
 }
 
-/* This chart follows the filters — slicing by line, lean or gate and
-   watching the series move IS the tool. */
-function perfDaily(xs) {
-  const byDay = new Map();
-  for (const r of graded(xs)) {
-    const d = localDay(r.kickoff);
-    const e = byDay.get(d) ?? { graded: 0, hits: 0 };
-    e.graded += 1;
-    e.hits += r.model_side_correct;
-    byDay.set(d, e);
-  }
-  return [...byDay.entries()].sort(([a], [b]) => a.localeCompare(b))
-    .map(([date, e]) => ({ date, graded: e.graded, hits: e.hits,
-                           hit_rate: e.hits / e.graded }));
-}
-
 /* ---- sortable "Every settled event" table ----
    Accessors return the sortable value; null means "no value" and sorts last
    in BOTH directions (a missing book price is not a small edge). */
@@ -960,12 +1050,12 @@ function renderPerf() {
   renderPerfCaveat(xs);
   renderPerfTiles(xs);
   renderPerfBreakdowns(xs);
-  renderRateChart({
+  // the chart still follows the filters — the date filter is what flips it
+  // from the current-week view to the single-day hourly view
+  renderHitMissChart({
     hostId: 'perf-chart', ttId: 'perf-chart-tt', cardId: 'perf-chart-card',
-    daily: perfDaily(xs),
-    rateLabel: 'DAILY HIT RATE % · MODEL SIDE', noun: 'gradable events',
-    empty: `not enough graded days yet — the chart appears once two or more
-      kickoff days have gradable rows.`,
+    frame: hitMissFrame(xs, perf.filters.date, (r) => r.model_side_correct),
+    noun: 'gradable events',
   });
 
   if (xs.length) {
@@ -1299,20 +1389,6 @@ function renderX12Table(xs) {
     + pagerHtml(x12perf.page, pg.pages, xs.length, pg.start, pg.rows.length);
 }
 
-function x12Daily(xs) {
-  const byDay = new Map();
-  for (const r of xs) {
-    const d = localDay(r.kickoff);
-    const e = byDay.get(d) ?? { graded: 0, hits: 0 };
-    e.graded += 1;
-    e.hits += r.side_correct;
-    byDay.set(d, e);
-  }
-  return [...byDay.entries()].sort(([a], [b]) => a.localeCompare(b))
-    .map(([date, e]) => ({ date, graded: e.graded, hits: e.hits,
-                           hit_rate: e.hits / e.graded }));
-}
-
 function renderX12Perf() {
   // the toggle SWITCHES the market view: O/U block xor 1x2 block
   $('ou-perf').hidden = state.x12;
@@ -1331,12 +1407,11 @@ function renderX12Perf() {
   renderX12Caveat(xs);
   renderX12Tiles(xs);
   renderX12Breakdowns(xs);
-  renderRateChart({
+  // no pushes in a 3-way market, so side_correct always grades
+  renderHitMissChart({
     hostId: 'x12-chart', ttId: 'x12-chart-tt', cardId: 'x12-chart-card',
-    daily: x12Daily(xs),
-    rateLabel: 'DAILY HIT RATE % · TOP OUTCOME', noun: 'settled events',
-    empty: `not enough settled days yet — the chart appears once two or more
-      kickoff days have settled 1x2 rows.`,
+    frame: hitMissFrame(xs, x12perf.filters.date, (r) => r.side_correct),
+    noun: 'settled events',
   });
   if (!xs.length) {
     $('x12-table').innerHTML = all.length

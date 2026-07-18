@@ -2,7 +2,8 @@
 
 Status: Phases 0–3 DONE (0–2 on 2026-07-11; Phase 3 on 2026-07-12 — owner
 chose to surface schedule picks in the web app). Phase 4 gated as planned.
-Phase 2 one-week verification gate due ~2026-07-18.
+Phase 2 verification gate RUN 2026-07-18: PASS with annotations (see "Gate
+result" in Phase 2; the priced-picks expectation is amended, not violated).
 
 ## Why (measured 2026-07-11)
 
@@ -221,6 +222,18 @@ them later:
   output: on book-priced lines the model currently has no pick-grade
   information. Picks against the book should return only if the vs-book
   edge coefficient ever turns positive (Phase 4 gate).
+  **Amended 2026-07-18:** "nearly vanish" was written under the
+  contaminated served-prob fit (a ≈ 0.014); the raw-basis `-recal2` maps
+  keep moderate slope (served-prob Platt a ≈ 0.95) and pass ~26 picks/day
+  (~10% of priced rows, mostly near-gate 0.60–0.62) hitting 58.5% vs
+  45–47% under the earlier generations. The correct expectation is
+  **picks are honest or absent** — judge by hit-vs-stated-confidence, not
+  by count. Most survivors *agree* with the book side (with-book 67 @
+  64.2%, against-book 19 @ 63.2%, book~coin 32 @ 43.8%), so they are not
+  the adverse-selection pathology this bullet guarded against. The split
+  is now a tracked section in `settle vs-book` ("picks by book
+  agreement"). Bettability is unchanged: still gated on the Phase 4 edge
+  coefficient, which has not cleared zero.
 - Schedule picks survive with a near-identity map (probe: 376 picks at
   64.1% under own map). Tier volume shifts almost entirely to the
   schedule population; `tier_bands` quantiles must be computed per
@@ -246,6 +259,30 @@ Judge the gate on `-recal2` rows only; plain `-recal` rows (07-11..07-13)
 were served under the contaminated fit generation and are not evidence
 about the fixed maps. If `-recal2` accrual is thin by 07-18, slide the
 gate to ~07-20 rather than pooling generations.
+
+Gate result (2026-07-18): **PASS with annotations.** Accrual was thick
+(2,521 schedule / 1,207 priced `-recal2` graded served line-rows), so the
+gate was judged on schedule, not slid.
+
+- Schedule: picks survive — 1,105 @ 62.4%, tiers monotone 55.3/63.2/70.0
+  (strong sits on its re-banded 0.69 label). Deciles breach ±8 in 2/10
+  bins (+9.0/+9.3 pts, n ≈ 252/bin, SE ≈ 3.1), but a Platt fit on the
+  served probs gives a = 0.92 ± 0.08, b = +0.11: a mild uniform
+  *under*confidence (~3 pts), the safe direction — not the overconfidence
+  failure mode the ±8 criterion guards. Annotation 1: letter-of-criterion
+  breach, substance sound.
+- Priced: map passes `model.evaluate conditional` — recal beats base on
+  Brier (0.2345 vs 0.2355) and AUC (0.640 vs 0.635) overall and pulls
+  tail-line means toward realized (5.5: 0.387→0.409 vs 0.440; 6.5:
+  0.356→0.434 vs 0.447; the 6.5 recal AUC dip to 0.44 is n=418 noise).
+  Picks did NOT go rare-to-zero — see the amended expectation bullet
+  above (Annotation 2).
+- Phase 4 pre-read on the 5d `-recal2` window: edge coef +0.322, 95% CI
+  [−0.067, +0.724], P(>0) = 0.947 — leaning positive, CI not clear of
+  zero, so the edge gate stays no-go (~11 more days at current
+  throughput to resolve the paired Brier). `value_flag` rows hit 48.3%
+  vs 58.8% for no-value: the value flag remains anti-signal on priced
+  rows — unresolved, worth its own probe.
 
 ## Phase 3 — analytics and product surfacing
 
@@ -292,6 +329,13 @@ In order, each gating the next:
    saturate (~1 week). The 45%-hit pick population should be gone by
    construction. If picks still surface and still lose, something beyond
    calibration is wrong — stop and diagnose before any meta-model.
+   07-18 pre-read: not triggered — picks surface and win (118 @ 58.5% vs
+   1,089 suppressed). Monitoring axis for the recheck: the "picks by book
+   agreement" section in `settle vs-book`. The bucket to watch is
+   book~coin (43.8% @ n=32 — the model claiming discrimination where the
+   price claims none, i.e. the residual of the old hole). Still sub-50%
+   at n ≈ 100+ ⇒ consider a coin-zone pick guard; at n=32 it is
+   noise-compatible, do not act.
 2. Edge-coefficient go/no-go at ≥ ~1k settled priced rows:
    `settle vs-book` edge coef > 0 with CI clear of zero is the ONLY
    condition under which picks that fight the book can ever be positive

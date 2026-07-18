@@ -407,7 +407,8 @@ CONDITIONAL_MIN_FIT = 50  # per-line daily-refit floor inside conditional_report
 
 
 def conditional_report(preds: pd.DataFrame, w: float = TOTALS_BLEND_WEIGHT,
-                       warmup_days: int = PHI_WARMUP_DAYS) -> dict:
+                       warmup_days: int = PHI_WARMUP_DAYS,
+                       pace: np.ndarray | None = None) -> dict:
     """Book-population evaluation: each match is scored ONLY at the two
     half-lines straddling its own expected total, base = max(1, round(μ)) —
     serving's _schedule_row rule and a proxy for the book's line menu.
@@ -422,7 +423,13 @@ def conditional_report(preds: pd.DataFrame, w: float = TOTALS_BLEND_WEIGHT,
 
     Arms: base (raw Poisson map) and recal (per-line Platt refit daily on
     prior eval days, fit only on rows whose own line menu included L — the
-    same selection serving's maps are fit on).
+    same selection serving's maps are fit on). With `pace` (pace_decay per
+    preds row, aligned with the full frame) a third arm fits the SERVING
+    map shape sigmoid(a·logit(p) + b + c·pace) through recal's own
+    fit/apply — the docs/TOTALS_H2H.md pre-read: the fitted c on this
+    book-conditional population previews the priced serving coefficient
+    (expect it below the unconditional gate's 0.53–0.65, the same way
+    recal's own slope flattens here).
 
     Read per-line/per-segment blocks for discrimination: the top-level pooled
     AUC also counts cross-line composition (a 3.5-line row SHOULD carry a
@@ -431,25 +438,32 @@ def conditional_report(preds: pd.DataFrame, w: float = TOTALS_BLEND_WEIGHT,
     """
     from scipy.stats import poisson as sp_poisson
 
+    covered = preds["covered"].to_numpy()
     p = preds[preds["covered"]]
     mu = (w * (p["lam_p_h"] + p["lam_p_a"])
           + (1 - w) * (p["lam_f_h"] + p["lam_f_a"])).to_numpy()
     base_line = np.maximum(1.0, np.round(mu))
+    pace_cov = (np.asarray(pace, dtype=float)[covered]
+                if pace is not None else np.zeros(len(p)))
     parts = []
     for off in (-0.5, +0.5):
         line = base_line + off
         parts.append(pd.DataFrame({
             "date": p["date"].to_numpy(), "total": p["total"].to_numpy(),
-            "base": base_line, "line": line,
+            "base": base_line, "line": line, "pace": pace_cov,
             "prob": 1.0 - sp_poisson.cdf(np.floor(line), mu),
         }))
     d = pd.concat(parts, ignore_index=True)
     d["y"] = (d["total"] > d["line"]).astype(int)
+    arms = ("base", "recal") + (("pace",) if pace is not None else ())
+    cols = {"base": "prob", "recal": "recal", "pace": "pace_p"}
     d["recal"] = np.nan
+    d["pace_p"] = np.nan
     days = sorted(d["date"].unique())
     if len(days) <= warmup_days + 1:
         raise ValueError(f"need > {warmup_days + 1} eval days for warmup")
 
+    pace_last: dict = {}
     for day in days[warmup_days:]:
         hist, cur = d[d["date"] < day], d["date"] == day
         for line in sorted(d.loc[cur, "line"].unique()):
@@ -459,16 +473,24 @@ def conditional_report(preds: pd.DataFrame, w: float = TOTALS_BLEND_WEIGHT,
             if len(h) >= CONDITIONAL_MIN_FIT and 0 < y_h.sum() < len(y_h):
                 ab = fit_platt(h["prob"].to_numpy(), y_h)
                 d.loc[c, "recal"] = apply_platt(ab, d.loc[c, "prob"])
+                if pace is not None:
+                    abc = fit_platt(h["prob"].to_numpy(), y_h,
+                                    feat=h["pace"].to_numpy())
+                    d.loc[c, "pace_p"] = apply_platt(abc, d.loc[c, "prob"],
+                                                     d.loc[c, "pace"])
+                    pace_last[f"{line:g}"] = {
+                        "a": round(abc[0], 4), "b": round(abc[1], 4),
+                        "c": round(abc[2], 4), "n_fit": len(h)}
             else:  # thin line: identity, exactly like an unmapped served line
                 d.loc[c, "recal"] = d.loc[c, "prob"]
+                d.loc[c, "pace_p"] = d.loc[c, "prob"]
 
     q = d[d["date"] >= days[warmup_days]]
-    arms = ("base", "recal")
 
     def _block(g: pd.DataFrame) -> dict:
         rec: dict = {"n": len(g), "realized_over": round(float(g["y"].mean()), 4)}
         for arm in arms:
-            col = g["prob"] if arm == "base" else g["recal"]
+            col = g[cols[arm]]
             rec[f"{arm}_p_mean"] = round(float(col.mean()), 4)
             rec[f"{arm}_brier"] = round(float(np.mean((col - g["y"]) ** 2)), 4)
             if g["y"].nunique() == 2:
@@ -476,6 +498,8 @@ def conditional_report(preds: pd.DataFrame, w: float = TOTALS_BLEND_WEIGHT,
         return rec
 
     out: dict = {"w": w, **{f"{k}": v for k, v in _block(q).items()}}
+    if pace is not None:
+        out["pace_last"] = pace_last
     out["by_base"] = {seg: _block(q[m]) for seg, m in
                       (("low(<=3)", q["base"] <= 3), ("mid(4)", q["base"] == 4),
                        ("high(>=5)", q["base"] >= 5)) if m.any()}
@@ -1350,7 +1374,15 @@ def main(argv=None) -> int:
     if args.mode == "conditional":
         preds = build_predictions(df, args.eval_days, args.lag, args.half_life,
                                   args.alpha, args.span, verbose=True)
-        rep = conditional_report(preds)
+        # pace arm (docs/TOTALS_H2H.md pre-read): pace_decay at each eval
+        # row's own kickoff, the h2h_report feature rule — the fitted c
+        # previews the book-conditional serving coefficient.
+        idx = h2h.H2HIndex(df, lag_min=args.lag)
+        feats = idx.frame(df[df["match_id"].isin(preds["match_id"])])
+        pace = (preds[["match_id"]]
+                .merge(feats[["match_id", "pace_decay"]], on="match_id",
+                       how="left")["pace_decay"].fillna(0.0).to_numpy())
+        rep = conditional_report(preds, pace=pace)
         print(json.dumps(rep, indent=2, default=str))
         _record_run(conn, "conditional", vars(args), rep)
         return 0

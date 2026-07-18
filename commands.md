@@ -6,6 +6,10 @@ project venv (`.venv`). Data lives in `data/gtleague.db` (SQLite).
 ## One-time setup
 
 ```shell
+#To pullt o linux server
+python -m http.server 8080
+
+
 python -m venv .venv
 .venv/Scripts/pip install -e ".[dev]"
 cd services/api && npm install && cd ../..
@@ -74,11 +78,20 @@ book at its strongest, not the book plus its margin.
 ```shell
 .venv/Scripts/python -m settlement.settle vs-book --days 7
 .venv/Scripts/python -m settlement.settle vs-book --days 30 --boot 500
+.venv/Scripts/python -m settlement.settle vs-book --days 30 --tag recal2
 ```
 
 `--boot` sets the bootstrap resamples behind every confidence interval
 (default 2000; lower it for a faster answer, raise it for stabler tails).
 `--seed` makes a run reproducible.
+
+`--tag` keeps only rows whose `model_version` contains the substring — the
+clean-generation read for a window that mixes serving generations (e.g.
+`--tag recal2` scores only rows priced by the post-2026-07-13 raw-basis
+maps; rows priced through the closed-loop `-recal` maps and pre-recal rows
+drop out). The header reports how many rows the tag excluded. Works on
+`x12-vs-book` too. Substring matching, so mind prefixes: `recal` also
+matches `-recal2` — use `recal2` when you mean the clean generation.
 
 Rows are excluded when they are leak-flagged, when the result pushed on an
 integer line, or when the model had no coverage of a player — those served the

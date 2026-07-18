@@ -25,6 +25,12 @@ Feature perspectives: everything is from the HOME player's side. Win-edge
 and goal-diff features are winner-signed (they cancel in a total); the pace
 features are the totals-shaped pair signal (prior-meeting mean total vs the
 league's running mean, both under the same visibility rule).
+
+The totals serving path consumes `pace_decay` through the recal map, not a
+stacker of its own: recal.fit_line_maps(..., h2h_idx=...) extends the
+per-line Platt maps with a pace term (docs/TOTALS_H2H.md — the
+no-second-layer decision). Nothing new lives here for it; `TOTALS_FEATURES`
+above is that serving set.
 """
 
 import sqlite3

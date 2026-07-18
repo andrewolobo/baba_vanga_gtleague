@@ -88,6 +88,17 @@ class Settings(BaseSettings):
     x12_h2h_enabled: bool = False
     x12_h2h_days: int = 14
     x12_h2h_min_n: int = 500
+    # Pair-pace term in the totals recal maps (docs/TOTALS_H2H.md; 90-day
+    # gate PASSED 2026-07-13, conditional pre-read 2026-07-18: c ≈ 0.6
+    # holds under line-conditioning). Extends the per-line Platt maps with
+    # c·pace_decay — one map path, never a second layer. Requires
+    # recal_enabled: the pace term rides the recal map, so with recal off
+    # there is no map to extend and the cycle treats RECAL_ENABLED=false as
+    # overriding this flag. Engagement rides recal's existing knobs
+    # (recal_days / recal_min_n / recal_min_n_line) — no knobs of its own.
+    # Rows priced through an engaged extended map carry '-recal2-h2h'.
+    # Default OFF — same timer live-switch caveat as every flag.
+    totals_h2h_enabled: bool = False
     # Minutes after scheduled kickoff before a fixture is ELIGIBLE for
     # settlement — a first-touch churn guard, not a correctness guard (a
     # missing result leaves the fixture pending; the NOT EXISTS loop
