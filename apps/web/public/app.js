@@ -2038,6 +2038,7 @@ async function refresh() {
     Object.assign(state, { slate, metrics, players, settled, health });
     renderStatus(); renderSlate(); renderScorecard(); renderPlayers();
     renderSettled(); renderSlip();  // slate changed → refresh slip stale marks
+    if (!$('view-wagers').hidden) void loadWagers();  // live-grade open slips
     const mv = slate.find((f) => f.model_version)?.model_version;
     if (mv) $('foot-model').textContent = `model ${mv}`;
   } catch (e) {
