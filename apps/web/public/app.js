@@ -230,6 +230,7 @@ function x12FixtureCard(fx) {
       <span style="margin-left:auto;color:var(--ink3);">λ ${fx.lambda_home ?? '—'}
         / ${fx.lambda_away ?? '—'}</span>
     </div>
+    ${oddsButtons(fx)}
   </article>`;
 }
 
@@ -279,6 +280,7 @@ function fixtureCard(fx) {
       <span style="margin-left:auto;color:var(--ink3);">λ ${fx.lambda_home ?? '—'}
         / ${fx.lambda_away ?? '—'}</span>
     </div>
+    ${oddsButtons(fx)}
   </article>`;
 }
 
@@ -301,6 +303,191 @@ function renderSlate() {
     : `<div class="empty" style="grid-column:1/-1;">no fixtures match —
        the book prices ~1h ahead, so an empty slate usually just means
        between-rounds. It refreshes automatically.</div>`;
+}
+
+/* ---------- betslip (paper trading) ----------
+
+   The one write path in the UI. Odds buttons render on PRICED cards only and
+   respect the 1X2 swap rule (O/U buttons xor 1x2 buttons, never both). Clicks
+   reach the slip via delegation on #slate (which persists across renders); the
+   selected state is rebuilt from `slip` on every renderSlate, so an SSE refresh
+   that rebuilds the cards can never desync the buttons. The floating panel is
+   its own root in index.html, outside every re-rendered container. */
+
+const slip = (() => {
+  try {
+    const s = JSON.parse(localStorage.getItem('wagerSlip') || '{}');
+    return { legs: Array.isArray(s.legs) ? s.legs : [], stake: s.stake ?? 1 };
+  } catch { return { legs: [], stake: 1 }; }
+})();
+const saveSlip = () =>
+  localStorage.setItem('wagerSlip', JSON.stringify(slip));
+
+const legKey = (ev, market, line, selection) =>
+  `${ev}|${market}|${line ?? ''}|${selection}`;
+const inSlip = (ev, market, line, selection) =>
+  slip.legs.some((l) => legKey(l.event_id, l.market, l.line, l.selection)
+    === legKey(ev, market, line, selection));
+const slateHas = (ev) => state.slate.some((f) => f.event_id === ev);
+
+function oddsBtn(fx, market, line, selection, odds, label) {
+  const active = inSlip(fx.event_id, market, line, selection);
+  return `<button class="odds-btn${active ? ' active' : ''}"
+    data-ev="${esc(fx.event_id)}" data-mkt="${market}" data-line="${line ?? ''}"
+    data-sel="${selection}" data-odds="${odds}"
+    >${esc(label)} <b>${odds}</b></button>`;
+}
+
+// Priced cards only; 1x2 view shows H/D/A, O/U view shows every priced line's
+// two sides. The swap rule holds because state.x12 picks exactly one branch.
+function oddsButtons(fx) {
+  if (!fx.priced) return '';
+  if (state.x12) {
+    const o = fx.x12?.odds;
+    if (!o || o.home == null) return '';
+    return `<div class="oddsrow">${['home', 'draw', 'away'].map((s) =>
+      o[s] != null
+        ? oddsBtn(fx, '1x2', null, s, o[s], s[0].toUpperCase() + s.slice(1))
+        : '').join('')}</div>`;
+  }
+  const rows = fx.lines
+    .filter((l) => l.over_odds != null || l.under_odds != null)
+    .map((l) => `<div class="oddsrow">
+      ${l.over_odds != null ? oddsBtn(fx, 'ou', l.line, 'over', l.over_odds, `O ${l.line}`) : ''}
+      ${l.under_odds != null ? oddsBtn(fx, 'ou', l.line, 'under', l.under_odds, `U ${l.line}`) : ''}
+    </div>`).join('');
+  return rows;
+}
+
+// One leg per event: an exact re-click toggles the leg off; a different
+// selection on the same event replaces it (client mirror of the server rule).
+function toggleLeg(ds) {
+  const market = ds.mkt;
+  const line = market === 'ou' ? Number(ds.line) : null;
+  const selection = ds.sel;
+  const ev = ds.ev;
+  const key = legKey(ev, market, line, selection);
+  const exact = slip.legs.findIndex((l) =>
+    legKey(l.event_id, l.market, l.line, l.selection) === key);
+  if (exact >= 0) {
+    slip.legs.splice(exact, 1);
+  } else {
+    const fx = state.slate.find((f) => f.event_id === ev);
+    slip.legs = slip.legs.filter((l) => l.event_id !== ev);
+    slip.legs.push({
+      event_id: ev, market, line, selection, odds: Number(ds.odds),
+      home: fx?.home?.club ?? '', away: fx?.away?.club ?? '',
+      home_player: fx?.home?.player ?? null, away_player: fx?.away?.player ?? null,
+      kickoff: fx?.kickoff ?? null,
+    });
+  }
+  saveSlip();
+  renderSlate();  // rebuilds the active state on the fresh buttons
+  renderSlip();
+}
+
+const selLabel = (l) => l.market === 'ou'
+  ? `${l.selection === 'over' ? 'Over' : 'Under'} ${l.line}`
+  : `${l.selection[0].toUpperCase()}${l.selection.slice(1)}`;
+
+function showToast(msg) {
+  const t = $('toast');
+  t.textContent = msg;
+  t.hidden = false;
+  clearTimeout(showToast._t);
+  showToast._t = setTimeout(() => { t.hidden = true; }, 2600);
+}
+
+function renderSlip() {
+  const panel = $('slip');
+  if (!slip.legs.length) { panel.hidden = true; return; }
+  panel.hidden = false;
+  const combined = slip.legs.reduce((a, l) => a * l.odds, 1);
+  const anyStale = slip.legs.some((l) => !slateHas(l.event_id));
+  $('slip-legs').innerHTML = slip.legs.map((l, i) => {
+    const stale = !slateHas(l.event_id);
+    const match = l.home_player || l.away_player
+      ? `${esc(l.home_player ?? l.home)} v ${esc(l.away_player ?? l.away)}`
+      : `${esc(l.home)} v ${esc(l.away)}`;
+    return `<div class="slip-leg${stale ? ' stale' : ''}">
+      <div><div class="lg-sel">${esc(selLabel(l))}</div>
+        <div class="lg-match">${match}</div>
+        ${stale ? '<div class="lg-stale">kicked off — remove to place</div>' : ''}</div>
+      <div class="lg-r"><span class="lg-odds">${l.odds}</span>
+        <button class="lg-x" data-rm="${i}" aria-label="Remove leg">×</button></div>
+    </div>`;
+  }).join('');
+  $('slip-odds').textContent = combined.toFixed(2);
+  const stake = Number($('slip-stake').value) || 0;
+  $('slip-return').textContent = (stake * combined).toFixed(2);
+  $('slip-place').disabled = anyStale || stake <= 0;
+}
+
+async function placeSlip() {
+  const msg = $('slip-msg');
+  msg.hidden = true;
+  if (slip.legs.some((l) => !slateHas(l.event_id))) {
+    msg.textContent = 'Remove kicked-off legs before placing.';
+    msg.hidden = false;
+    return;
+  }
+  const stake = Number($('slip-stake').value);
+  try {
+    const r = await fetch('/api/wagers', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        stake,
+        legs: slip.legs.map((l) => ({
+          event_id: l.event_id, market: l.market,
+          line: l.line, selection: l.selection,
+        })),
+      }),
+    });
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok) {
+      msg.textContent = data.error || `could not place bet (${r.status})`;
+      msg.hidden = false;
+      return;
+    }
+    slip.legs = [];
+    saveSlip();
+    renderSlate();
+    renderSlip();
+    showToast('Bet placed ✓');
+    if (!$('view-wagers').hidden) void loadWagers();
+  } catch {
+    msg.textContent = 'network error — bet not placed';
+    msg.hidden = false;
+  }
+}
+
+function wireSlip() {
+  // delegation: #slate persists, its cards are rebuilt each render
+  $('slate').addEventListener('click', (ev) => {
+    const b = ev.target.closest('.odds-btn');
+    if (b) toggleLeg(b.dataset);
+  });
+  $('slip-legs').addEventListener('click', (ev) => {
+    const b = ev.target.closest('button[data-rm]');
+    if (!b) return;
+    slip.legs.splice(Number(b.dataset.rm), 1);
+    saveSlip();
+    renderSlate();
+    renderSlip();
+  });
+  $('slip-clear').onclick = () => {
+    slip.legs = [];
+    saveSlip();
+    renderSlate();
+    renderSlip();
+  };
+  $('slip-stake').value = slip.stake;
+  $('slip-stake').addEventListener('input', () => {
+    slip.stake = Number($('slip-stake').value) || 0;
+    saveSlip();
+    renderSlip();  // updates potential return + place enablement, no rebuild
+  });
+  $('slip-place').onclick = () => void placeSlip();
 }
 
 /* ---------- scorecard ---------- */
@@ -1676,9 +1863,155 @@ setInterval(() => {
   if (!$('view-trajectory').hidden) renderMilestones();
 }, 60_000);
 
+/* ---------- wagers tab (paper trading) ----------
+
+   Reads /api/wagers + /api/wagers/summary and renders on tab activation, and
+   again right after a bet is placed. Grading is server-derived; this is a dumb
+   renderer like the rest of the app. A won slip whose only winning legs pushed
+   or voided is shown as a PUSH (it returns exactly the stake). */
+
+const wagersState = { list: [], summary: null };
+
+// display status folds the server's 3-way status into the 4-way ledger view:
+// a 'won' slip with no actually-won leg (all push/void) reads as a push
+const wagerDisplayStatus = (w) => w.status !== 'won' ? w.status
+  : w.legs.some((l) => l.outcome === 'won') ? 'won' : 'push';
+
+const LEG_OUTCOME_SYM = { pending: '·', won: '✓', lost: '✕', push: '—', void: '∅' };
+
+function wagerLegLine(l) {
+  const match = l.home_player || l.away_player
+    ? `${esc(l.home_player ?? l.home_club ?? '')} v ${esc(l.away_player ?? l.away_club ?? '')}`
+    : `${esc(l.home_club ?? '')} v ${esc(l.away_club ?? '')}`;
+  const sel = l.market === 'ou'
+    ? `${l.selection === 'over' ? 'Over' : 'Under'} ${l.line}`
+    : `${l.selection[0].toUpperCase()}${l.selection.slice(1)}`;
+  return `<div class="wr-leg">
+    <span>${match} <span style="color:var(--ink3);">·</span> ${esc(sel)}</span>
+    <span class="wl-o"><span class="wl-${l.outcome}">${LEG_OUTCOME_SYM[l.outcome]}
+      ${l.outcome}</span> · ${l.odds}</span></div>`;
+}
+
+function renderWagerTiles() {
+  const s = wagersState.summary;
+  if (!s) return;
+  const r = s.record;
+  const settled = r.won + r.lost + r.push;
+  const decided = r.won + r.lost;
+  const pnlCls = s.pnl > 0 ? 'accent' : '';
+  $('wager-tiles').innerHTML = tilesHtml([
+    ['RECORD W-L-P', `${r.won}-${r.lost}-${r.push}`, ''],
+    ['HIT RATE', decided ? pct(r.won / decided) : '—', 'accent'],
+    ['STAKED', settled ? s.staked.toFixed(2) : '—', ''],
+    ['RETURNED', settled ? s.returned.toFixed(2) : '—', ''],
+    ['P / L', settled ? (s.pnl >= 0 ? '+' : '') + s.pnl.toFixed(2) : '—', pnlCls],
+    ['ROI', s.roi != null ? pct(s.roi) : '—', pnlCls],
+  ]);
+}
+
+function renderOpenWagers() {
+  const open = wagersState.list.filter((w) => w.status === 'open');
+  const stake = wagersState.summary?.open_stake ?? 0;
+  $('wager-open-meta').textContent = open.length
+    ? `${open.length} open · ${stake.toFixed(2)} units at stake` : '';
+  $('wager-open').innerHTML = open.length ? open.map((w) => {
+    const ret = (w.stake * w.total_odds);
+    const single = w.legs.length === 1;
+    return `<div class="wager-row open">
+      <div class="wr-head">
+        <span class="meta">${localDHM(w.placed_at)} · ${single ? 'single'
+          : w.legs.length + '-leg parlay'}</span>
+        <span class="wr-status">open</span></div>
+      ${w.legs.map(wagerLegLine).join('')}
+      <div class="wr-foot">
+        <span>stake <b>${w.stake}</b> · odds <b>${w.total_odds.toFixed(2)}</b>
+          · to return <b>${ret.toFixed(2)}</b></span>
+        <button class="wr-cancel" data-cancel="${w.id}">CANCEL</button></div>
+    </div>`;
+  }).join('') : `<div class="empty">no open wagers — place one from the Ledger
+    tab's slate to start a paper trade.</div>`;
+}
+
+function renderSettledWagers() {
+  const settled = wagersState.list.filter((w) => w.status !== 'open');
+  $('wager-settled-meta').textContent = settled.length
+    ? `${settled.length} settled · won/push return stake × odds, losses return 0`
+    : '';
+  if (!settled.length) {
+    $('wager-settled').innerHTML = `<div class="empty">nothing settled yet —
+      wagers grade as their legs' events settle (~45 min after kickoff).</div>`;
+    return;
+  }
+  const rows = settled.map((w) => {
+    const ds = wagerDisplayStatus(w);
+    const pnl = (w.payout ?? 0) - w.stake;
+    const plCls = pnl > 0 ? 'pl-pos' : pnl < 0 ? 'pl-neg' : '';
+    const legs = w.legs.map((l) => {
+      const sel = l.market === 'ou'
+        ? `${l.selection === 'over' ? 'O' : 'U'} ${l.line}`
+        : l.selection[0].toUpperCase() + l.selection.slice(1);
+      const m = l.home_player ?? l.home_club ?? '';
+      const a = l.away_player ?? l.away_club ?? '';
+      return `<div class="wr-leg"><span>${esc(m)} v ${esc(a)}
+        <span style="color:var(--ink3);">·</span> ${esc(sel)}</span>
+        <span class="wl-o"><span class="wl-${l.outcome}">${LEG_OUTCOME_SYM[l.outcome]}</span>
+          ${l.odds}</span></div>`;
+    }).join('');
+    return `<tr class="wager-row-tr ${ds}">
+      <td class="num" style="white-space:nowrap;color:var(--ink2);vertical-align:top;">
+        ${localDHM(w.placed_at)}</td>
+      <td style="min-width:220px;">${legs}</td>
+      <td class="num r" style="vertical-align:top;">${w.stake}</td>
+      <td class="num r" style="vertical-align:top;">${w.total_odds.toFixed(2)}</td>
+      <td class="num r" style="vertical-align:top;">${(w.payout ?? 0).toFixed(2)}</td>
+      <td class="num r ${plCls}" style="vertical-align:top;">
+        ${pnl >= 0 ? '+' : ''}${pnl.toFixed(2)}</td>
+      <td style="vertical-align:top;"><span class="wl-${ds === 'push' ? 'push'
+        : ds === 'won' ? 'won' : 'lost'}" style="white-space:nowrap;">
+        ${ds.toUpperCase()}</span></td>
+    </tr>`;
+  }).join('');
+  $('wager-settled').innerHTML = `<table class="ledger">
+    <thead><tr><th>Placed</th><th>Legs</th><th class="r">Stake</th>
+      <th class="r">Odds</th><th class="r">Return</th><th class="r">P/L</th>
+      <th>Result</th></tr></thead><tbody>${rows}</tbody></table>`;
+}
+
+function renderWagers() {
+  renderWagerTiles();
+  renderOpenWagers();
+  renderSettledWagers();
+}
+
+async function loadWagers() {
+  try {
+    const [list, summary] = await Promise.all([
+      getJSON('/api/wagers'), getJSON('/api/wagers/summary'),
+    ]);
+    wagersState.list = list;
+    wagersState.summary = summary;
+    renderWagers();
+  } catch (e) {
+    $('wager-open').innerHTML =
+      `<div class="empty">could not load wagers: ${esc(e.message)}</div>`;
+  }
+}
+
+// cancel is delegated on the persistent open-list container
+$('wager-open').addEventListener('click', async (ev) => {
+  const b = ev.target.closest('button[data-cancel]');
+  if (!b) return;
+  const r = await fetch(`/api/wagers/${b.dataset.cancel}`, { method: 'DELETE' });
+  if (r.ok) { showToast('Wager cancelled'); void loadWagers(); }
+  else {
+    const d = await r.json().catch(() => ({}));
+    showToast(d.error || 'could not cancel');
+  }
+});
+
 /* ---------- tabs ---------- */
 
-const TABS = ['ledger', 'performance', 'trajectory'];
+const TABS = ['ledger', 'performance', 'trajectory', 'wagers'];
 
 function showTab() {
   const hash = location.hash.slice(1);
@@ -1689,6 +2022,7 @@ function showTab() {
   }
   if (active === 'performance') void loadPerf();
   if (active === 'trajectory') void loadTrajectory();
+  if (active === 'wagers') void loadWagers();
 }
 window.addEventListener('hashchange', showTab);
 
@@ -1703,7 +2037,7 @@ async function refresh() {
     ]);
     Object.assign(state, { slate, metrics, players, settled, health });
     renderStatus(); renderSlate(); renderScorecard(); renderPlayers();
-    renderSettled();
+    renderSettled(); renderSlip();  // slate changed → refresh slip stale marks
     const mv = slate.find((f) => f.model_version)?.model_version;
     if (mv) $('foot-model').textContent = `model ${mv}`;
   } catch (e) {
@@ -1747,7 +2081,10 @@ wireSort('x12-table', x12perf.sort,
 wirePager('perf-table', perf.page, 'perfRows', renderPerf);
 wirePager('x12-table', x12perf.page, 'x12Rows', renderX12Perf);
 syncX12Btn();
+wireSlip();
+renderSlip();  // restore any persisted slip before the first slate load
 showTab();
 void refresh();
 connectSse();
-setInterval(() => { renderStatus(); renderSlate(); }, 30_000); // countdowns
+// countdowns; re-render the slip too so stale (kicked-off) marks stay current
+setInterval(() => { renderStatus(); renderSlate(); renderSlip(); }, 30_000);

@@ -24,3 +24,13 @@ export function one<T = Record<string, unknown>>(sql: string, ...args: unknown[]
 export function all<T = Record<string, unknown>>(sql: string, ...args: unknown[]): T[] {
   return db.prepare(sql).all(...(args as never[])) as T[];
 }
+
+// The single writable handle onto the same file. Everything above this line
+// stays read-only by doctrine; the ONLY writer is the paper-trading (wagers)
+// surface (services/api/src/wagers.ts) — user state, never model output. The
+// Python jobs own every model table; this connection must not touch them.
+export const dbw = new DatabaseSync(DB_PATH);
+
+export function run(sql: string, ...args: unknown[]) {
+  return dbw.prepare(sql).run(...(args as never[]));
+}

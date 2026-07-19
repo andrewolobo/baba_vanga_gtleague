@@ -3,6 +3,7 @@ import fastifyStatic from '@fastify/static';
 import path from 'node:path';
 import { ROOT } from './db.js';
 import { registerRoutes } from './routes.js';
+import { registerWagerRoutes } from './wagers.js';
 import { registerSse } from './sse.js';
 import { startScheduler } from './jobs.js';
 
@@ -15,6 +16,7 @@ app.register(fastifyStatic, {
   root: path.join(ROOT, 'apps', 'web', 'public'),
 });
 registerRoutes(app);
+registerWagerRoutes(app);
 registerSse(app);
 
 app.listen({ port: PORT, host: HOST }).then(() => {

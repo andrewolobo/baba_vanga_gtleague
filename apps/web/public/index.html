@@ -242,6 +242,94 @@
   .wb-miss { color:var(--bad); font-weight:600; }
   .wb-push { color:var(--gold); font-weight:600; }
 
+  /* ── betslip (paper trading) ──────────────────────────────────────────
+     Odds buttons live on priced cards; clicking toggles a slip leg. The
+     floating slip panel (below) is its OWN root outside the re-rendered slate
+     containers, so an SSE refresh can rebuild the cards without disturbing it. */
+  .oddsrow { display:flex; gap:6px; margin-top:8px; }
+  .odds-btn { flex:1; cursor:pointer; font-family:'Newsreader',serif;
+    font-size:12px; padding:6px 8px; border-radius:8px; border:1px solid var(--line);
+    background:var(--surface); color:var(--ink2); white-space:nowrap; }
+  .odds-btn b { color:var(--ink); font-variant-numeric:tabular-nums; }
+  .odds-btn:hover { border-color:var(--ink2); }
+  .odds-btn.active { background:var(--accent); border-color:var(--accent); color:#fff; }
+  .odds-btn.active b { color:#fff; }
+
+  aside.slip { position:fixed; right:20px; bottom:20px; width:320px; z-index:20;
+    background:var(--surface); border:1px solid var(--line); border-radius:14px;
+    box-shadow:0 12px 40px -12px rgba(0,0,0,0.45); padding:16px; }
+  .slip-head { display:flex; justify-content:space-between; align-items:center;
+    font-family:'Newsreader',serif; font-weight:700; font-size:17px; }
+  .slip-head button { cursor:pointer; background:none; border:none; color:var(--ink3);
+    font-family:'Newsreader',serif; font-size:12px; letter-spacing:0.08em; }
+  .slip-leg { display:flex; justify-content:space-between; align-items:flex-start;
+    gap:8px; padding:9px 0; border-top:1px solid var(--line); }
+  .slip-leg .lg-sel { font-weight:600; font-size:13.5px; }
+  .slip-leg .lg-match { color:var(--ink2); font-size:12px; margin-top:2px; }
+  .slip-leg .lg-stale { color:var(--bad); font-size:11px; margin-top:2px; font-weight:600; }
+  .slip-leg.stale { opacity:0.65; }
+  .slip-leg .lg-r { display:flex; align-items:center; gap:8px; white-space:nowrap; }
+  .slip-leg .lg-odds { font-variant-numeric:tabular-nums; font-weight:700;
+    font-family:'Newsreader',serif; }
+  .slip-leg .lg-x { cursor:pointer; color:var(--ink3); border:none;
+    background:none; font-size:17px; line-height:1; padding:0; }
+  .slip-leg .lg-x:hover { color:var(--bad); }
+  .slip-foot { border-top:1px solid var(--line); margin-top:2px; padding-top:11px; }
+  .slip-line { display:flex; justify-content:space-between; font-size:13px;
+    color:var(--ink2); margin:5px 0; }
+  .slip-line b { color:var(--ink); font-variant-numeric:tabular-nums;
+    font-family:'Newsreader',serif; }
+  .slip-line.big b { font-size:17px; color:var(--accent); }
+  .slip-stake { display:flex; justify-content:space-between; align-items:center;
+    font-size:13px; color:var(--ink2); margin:10px 0; }
+  .slip-stake input { width:96px; font-family:'Newsreader',serif; font-size:14px;
+    text-align:right; color:var(--ink); background:var(--bg);
+    border:1px solid var(--line); border-radius:8px; padding:7px 11px; }
+  .slip-stake input:focus { outline:none; border-color:var(--ink2); }
+  .slip-msg { font-size:12.5px; color:var(--bad); margin:6px 0 2px;
+    font-family:'Newsreader',serif; }
+  button.pill.slip-place { width:100%; margin-top:10px; text-align:center; }
+  button.pill.slip-place[disabled] { opacity:0.4; cursor:default; }
+  .toast { position:fixed; left:50%; bottom:28px; transform:translateX(-50%);
+    background:var(--ink); color:var(--bg); padding:12px 24px; border-radius:99px;
+    font-family:'Newsreader',serif; font-size:14px; z-index:30;
+    box-shadow:0 10px 30px -10px rgba(0,0,0,0.5); animation:fadeUp .3s ease both; }
+  @media (max-width:640px){ aside.slip { right:10px; left:10px; width:auto; } }
+
+  /* wagers tab */
+  .wager-row { border:1px solid var(--line); border-left:4px solid var(--ink3);
+    border-radius:12px; padding:14px 16px; background:var(--surface);
+    margin-bottom:12px; }
+  .wager-row.won { border-left-color:var(--good); }
+  .wager-row.lost { border-left-color:var(--bad); }
+  .wager-row.push { border-left-color:var(--gold); }
+  .wager-row .wr-head { display:flex; justify-content:space-between;
+    align-items:baseline; gap:10px; margin-bottom:8px; }
+  .wager-row .wr-status { font-family:'Newsreader',serif; font-size:12px;
+    font-weight:700; letter-spacing:0.1em; text-transform:uppercase; }
+  .wager-row.won .wr-status { color:var(--good); }
+  .wager-row.lost .wr-status { color:var(--bad); }
+  .wager-row.push .wr-status { color:var(--gold); }
+  .wager-row.open .wr-status { color:var(--ink2); }
+  .wr-leg { display:flex; justify-content:space-between; gap:10px; font-size:13px;
+    padding:5px 0; border-top:1px dashed var(--line); }
+  .wr-leg .wl-o { font-family:'Newsreader',serif; font-variant-numeric:tabular-nums;
+    white-space:nowrap; }
+  .wl-pending { color:var(--ink3); } .wl-won { color:var(--good); font-weight:600; }
+  .wl-lost { color:var(--bad); font-weight:600; } .wl-push { color:var(--gold); font-weight:600; }
+  .wl-void { color:var(--ink3); font-weight:600; }
+  .wager-row .wr-foot { display:flex; justify-content:space-between;
+    align-items:center; margin-top:9px; padding-top:9px;
+    border-top:1px solid var(--line); font-size:13px; color:var(--ink2); }
+  .wager-row .wr-foot b { color:var(--ink); font-family:'Newsreader',serif;
+    font-variant-numeric:tabular-nums; }
+  .wr-cancel { cursor:pointer; font-family:'Newsreader',serif; font-size:11.5px;
+    letter-spacing:0.08em; padding:6px 12px; border-radius:99px;
+    border:1px solid var(--line); background:transparent; color:var(--ink2); }
+  .wr-cancel:hover { border-color:var(--bad); color:var(--bad); }
+  .ledger td.pl-pos { color:var(--good); font-weight:600; }
+  .ledger td.pl-neg { color:var(--bad); font-weight:600; }
+
   @keyframes fadeUp { from{opacity:0;transform:translateY(8px);} to{opacity:1;} }
   section, header.masthead, .status { animation:fadeUp .5s ease both; }
 </style>
@@ -269,6 +357,7 @@
     <a href="#ledger" id="tab-ledger" class="active">Ledger</a>
     <a href="#performance" id="tab-performance">Model performance</a>
     <a href="#trajectory" id="tab-trajectory">Trajectory</a>
+    <a href="#wagers" id="tab-wagers">Wagers</a>
     <button class="pill" id="x12-btn" style="margin-left:auto;"
       title="Switch both pages between O/U totals and 1x2 match-winner — display only, O/U by default">1X2 · OFF</button>
   </nav>
@@ -630,12 +719,61 @@
     </section>
   </div><!-- /view-trajectory -->
 
+  <!-- Paper trading: hypothetical slips placed off the priced slate. The one
+    write surface in the app; grading is derived server-side from settlements. -->
+  <div id="view-wagers" hidden>
+    <section style="border-top:none;padding-top:0;">
+      <div class="sect-head">
+        <h3>Paper trading</h3>
+        <span class="meta" id="wagers-meta">hypothetical slips placed off the
+          book-priced slate · graded off settled results · no real money, ROI
+          over settled wagers only</span>
+      </div>
+      <div class="tiles" id="wager-tiles"></div>
+    </section>
+
+    <section>
+      <div class="sect-head">
+        <h3>Open wagers</h3>
+        <span class="meta" id="wager-open-meta"></span>
+      </div>
+      <div id="wager-open"></div>
+    </section>
+
+    <section>
+      <div class="sect-head">
+        <h3>Settled wagers</h3>
+        <span class="meta" id="wager-settled-meta"></span>
+      </div>
+      <div style="overflow-x:auto;" id="wager-settled"></div>
+    </section>
+  </div><!-- /view-wagers -->
+
   <footer>
     <span id="foot-model">model —</span>
     <span>probabilistic forecasts · for information only</span>
   </footer>
 
 </div>
+
+<!-- Bet slip: own root, OUTSIDE .wrap and every re-rendered view container, so
+  the 30s / SSE slate rebuild never touches it. Odds-button clicks reach it via
+  event delegation; its selected state is re-derived on every slate render. -->
+<aside class="slip" id="slip" hidden>
+  <div class="slip-head">Bet slip <button id="slip-clear">CLEAR</button></div>
+  <div id="slip-legs"></div>
+  <div class="slip-foot">
+    <div class="slip-line"><span>Combined odds</span><b id="slip-odds">—</b></div>
+    <label class="slip-stake">Stake (units)
+      <input id="slip-stake" type="number" min="0.1" step="0.5" value="1"
+        inputmode="decimal" aria-label="Stake in units"></label>
+    <div class="slip-line big"><span>Potential return</span><b id="slip-return">—</b></div>
+    <div class="slip-msg" id="slip-msg" hidden></div>
+    <button class="pill solid slip-place" id="slip-place">PLACE BET</button>
+  </div>
+</aside>
+<div class="toast" id="toast" hidden></div>
+
 <script src="app.js"></script>
 </body>
 </html>

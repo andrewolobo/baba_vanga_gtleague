@@ -1,0 +1,21 @@
+## Location
+## /etc/systemd/system/baba-vanga-api.service
+
+
+[Unit]
+Description=Baba Vanga GT League API
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=uatu
+WorkingDirectory=/home/uatu/DEV/baba.vanga.gtleague/services/api
+Environment="GTL_PYTHON=/home/uatu/DEV/baba.vanga.gtleague/.venv/bin/python"
+Environment="PATH=/usr/local/bin:/usr/bin:/bin"
+ExecStart=/usr/bin/npm run start
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
