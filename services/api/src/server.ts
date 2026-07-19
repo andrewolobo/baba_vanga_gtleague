@@ -7,6 +7,7 @@ import { registerSse } from './sse.js';
 import { startScheduler } from './jobs.js';
 
 const PORT = Number(process.env.PORT ?? 8787);
+const HOST = process.env.HOST ?? '127.0.0.1';
 
 const app = Fastify({ logger: { level: 'warn' } });
 
@@ -16,8 +17,8 @@ app.register(fastifyStatic, {
 registerRoutes(app);
 registerSse(app);
 
-app.listen({ port: PORT, host: '127.0.0.1' }).then(() => {
-  console.log(`gtleague api+ui on http://localhost:${PORT}`);
+app.listen({ port: PORT, host: HOST }).then(() => {
+  console.log(`gtleague api+ui on http://${HOST}:${PORT}`);
   if (process.env.GTL_NO_JOBS !== '1') {
     void startScheduler(); // dev mode: the API is the orchestrator (Phase 5 note)
   } else {
