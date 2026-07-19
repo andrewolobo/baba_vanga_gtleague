@@ -117,11 +117,13 @@ class PredictionRepo:
             self.conn.executemany(
                 "INSERT INTO predictions (event_id, predicted_at, totals_source,"
                 " line, p_over, p_push, p_under, lambda_home, lambda_away, pick,"
-                " confidence, tier, value_flag, model_version, as_of_cutoff_ts)"
-                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                " confidence, tier, value_flag, screen_pass, screen_reason,"
+                " model_version, as_of_cutoff_ts)"
+                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 [(r.event_id, _iso(r.predicted_at), r.totals_source, r.line,
                   r.p_over, r.p_push, r.p_under, r.lambda_home, r.lambda_away,
                   r.pick, r.confidence, r.tier, int(r.value_flag),
+                  r.screen_pass, r.screen_reason,
                   r.model_version, _iso(r.as_of_cutoff_ts)) for r in rows],
             )
         return len(rows)
@@ -136,11 +138,13 @@ class X12PredictionRepo:
             self.conn.executemany(
                 "INSERT INTO predictions_x12 (event_id, predicted_at, p_home,"
                 " p_draw, p_away, lambda_home, lambda_away, pick, confidence,"
-                " value_flag, model_version, as_of_cutoff_ts)"
-                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                " value_flag, screen_pass, screen_reason, model_version,"
+                " as_of_cutoff_ts)"
+                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 [(r.event_id, _iso(r.predicted_at), r.p_home, r.p_draw,
                   r.p_away, r.lambda_home, r.lambda_away, r.pick, r.confidence,
-                  int(r.value_flag), r.model_version, _iso(r.as_of_cutoff_ts))
+                  int(r.value_flag), r.screen_pass, r.screen_reason,
+                  r.model_version, _iso(r.as_of_cutoff_ts))
                  for r in rows],
             )
         return len(rows)

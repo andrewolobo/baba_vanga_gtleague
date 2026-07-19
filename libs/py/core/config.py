@@ -121,6 +121,31 @@ class Settings(BaseSettings):
     # the served blend+club). Default OFF: enabling is a deploy decision.
     # Same live-switch caveat as club_enabled.
     tod_enabled: bool = False
+    # Pick screen (docs/PICK_SCREEN.md): rule-based veto ANNOTATIONS on
+    # served picks (screen_pass/screen_reason columns) — never mutates
+    # pick/tier, so regen stays honest by construction. screen_enabled
+    # writes the columns (safe, invisible); screen_ui_enabled is the flag
+    # that will actually surface it (Phase 2) and stays off through the
+    # dark-accrual phase. Rules are default-open: every rule self-skips
+    # below its sample floor and when its data is missing (no book on
+    # schedule rows), so a cold start passes everything.
+    screen_enabled: bool = True
+    screen_ui_enabled: bool = False
+    screen_days: int = 14  # settled-row window the rolling stats read
+    # book_opposed: book leans the other side and the model is not emphatic.
+    # 0.66 from the 2026-07-18 probe: opposed & conf<.66 hit 46.8% (n=821).
+    screen_override_conf: float = 0.66
+    # x12 confidences live on the max-of-three scale (~0.43 median), not the
+    # totals scale; provisional until re-read from served quantiles (Phase 2).
+    screen_x12_override_conf: float = 0.62
+    # cold_line / cold_band: rolling counterfactual hit floors + sample floors
+    screen_line_floor: float = 0.48
+    screen_min_n_line: int = 30
+    screen_band_floor: float = 0.50
+    screen_min_n_band: int = 30
+    # drawdown breaker: trailing served-pick hit over the last N graded
+    screen_trailing_n: int = 50
+    screen_breaker_floor: float = 0.45
     # Tier bands partition the picked region [pick_prob_threshold, 1]. Keep
     # tier_lean == pick_prob_threshold: a band below the gate can never be
     # assigned, because _tier only runs once the gate has passed.

@@ -1,6 +1,8 @@
 # Pick Screen — a dynamic, rule-based veto layer over served picks
 
-Status: PLANNED (probe run 2026-07-18; no code yet)
+Status: Phase 0 SHIPPED DARK 2026-07-18 (columns accruing, SCREEN_UI_ENABLED
+off; first live cycle annotated 72 picks, vetoed 2 — both cold_band). Judge
+Phase 1 via `python -m settlement.settle screen` after ~7d of settlements.
 
 A deterministic veto cascade that annotates every served pick — O/U and 1x2 —
 with `screen_pass` / `screen_reason`. The rules are hand-written and static;

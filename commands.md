@@ -79,6 +79,10 @@ book at its strongest, not the book plus its margin.
 .venv/Scripts/python -m settlement.settle vs-book --days 7
 .venv/Scripts/python -m settlement.settle vs-book --days 30 --boot 500
 .venv/Scripts/python -m settlement.settle vs-book --days 30 --tag recal2
+python -m settlement.settle vs-book --days 30 --tag recal2-h2h
+
+
+python -m settlement.settle screen --days 7
 ```
 
 `--boot` sets the bootstrap resamples behind every confidence interval

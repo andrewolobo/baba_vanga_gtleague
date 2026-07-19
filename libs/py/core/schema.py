@@ -58,6 +58,10 @@ class PredictionRow(BaseModel):
     confidence: float | None  # model prob of the picked side (see cycle._line_row)
     tier: str | None  # lean | solid | strong
     value_flag: bool = False
+    # Pick screen annotations (docs/PICK_SCREEN.md): advisory veto layer,
+    # never mutates pick/tier. None = no pick to screen or screen off.
+    screen_pass: int | None = None
+    screen_reason: str | None = None
     model_version: str
     as_of_cutoff_ts: datetime
 
@@ -78,6 +82,9 @@ class X12PredictionRow(BaseModel):
     pick: str | None  # home/draw/away; None below the x12 pick gate
     confidence: float | None  # max outcome prob (see X12_PICK_PROB_THRESHOLD)
     value_flag: bool = False
+    # Pick screen annotations — same contract as PredictionRow's.
+    screen_pass: int | None = None
+    screen_reason: str | None = None
     model_version: str
     as_of_cutoff_ts: datetime
 

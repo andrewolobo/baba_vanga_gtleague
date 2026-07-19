@@ -21,7 +21,7 @@ import pandas as pd
 from core.config import OFFSET_TOL_MIN, settings
 from core.markets import x12_probs
 from core.schema import PredictionRow, X12PredictionRow
-from model import data, h2h, recal, registry
+from model import data, h2h, recal, registry, screen
 from model.blend import PMF_MAX_GOALS, blend_sides, totals_probs
 from model.heuristic import FormIndex
 from store import aliases
@@ -116,10 +116,12 @@ def _row_version(version: str, maps, line) -> str:
 
 
 def _line_row(f, line, sels, lam_h, lam_a, now, cutoff, version, s,
-              maps, pace: float = 0.0) -> PredictionRow:
+              maps, pace: float = 0.0, scr=None) -> PredictionRow:
     """`pace` is the pair's pace_decay at the ROW'S OWN cutoff (not kickoff —
     pairs rematch between an early batch and kickoff; the x12 rule). Consumed
-    only by pace-extended maps (docs/TOTALS_H2H.md); a plain map ignores it."""
+    only by pace-extended maps (docs/TOTALS_H2H.md); a plain map ignores it.
+    `scr` is this population's ScreenStats or None (screen off) — the screen
+    annotates picked rows and never alters the pick (docs/PICK_SCREEN.md)."""
     book_over, book_under = sels["over"][1], sels["under"][1]
     covered = lam_h is not None
 
@@ -160,6 +162,15 @@ def _line_row(f, line, sels, lam_h, lam_a, now, cutoff, version, s,
                 and (not maps or float(line) in maps):
             pick, tier = sel, _tier(confidence, s)
 
+    s_pass = s_reason = None
+    if pick is not None and scr is not None:
+        # the screen's book basis is the picked side's implied prob, None
+        # when the book never priced it (unlike value's `or 0.0` fallback:
+        # a missing price must skip the book rules, not read as opposition)
+        s_pass, s_reason = screen.apply_ou(
+            line, confidence, tier,
+            book_over if pick == "over" else book_under, scr, s)
+
     return PredictionRow(
         event_id=f["event_id"], predicted_at=now, totals_source=source,
         line=line, p_over=round(p_over, 6), p_push=round(p_push, 6),
@@ -167,12 +178,13 @@ def _line_row(f, line, sels, lam_h, lam_a, now, cutoff, version, s,
         lambda_home=round(lam_h, 4) if covered else None,
         lambda_away=round(lam_a, 4) if covered else None,
         pick=pick, confidence=confidence, tier=tier, value_flag=value,
+        screen_pass=s_pass, screen_reason=s_reason,
         model_version=version, as_of_cutoff_ts=cutoff,
     )
 
 
 def _x12_row(f, lam_h, lam_a, x12_odds, now, cutoff, version, s,
-             stack=None, h2h_idx=None) -> X12PredictionRow:
+             stack=None, h2h_idx=None, scr=None) -> X12PredictionRow:
     """One 1x2 row per covered fixture, priced off the same served λs as the
     totals rows (docs/X12_SERVING.md). The gate is x12_pick_prob_threshold
     (0.50, measured), NOT the totals 0.60 — max-of-three lives on a different
@@ -202,11 +214,17 @@ def _x12_row(f, lam_h, lam_a, x12_odds, now, cutoff, version, s,
         pick, confidence = sel, round(probs[sel], 6)
         book_p = (x12_odds.get(sel) or (None, None))[1]
         value = book_p is not None and (probs[sel] - book_p) >= s.min_edge
+    s_pass = s_reason = None
+    if pick is not None and scr is not None:
+        book = {k: (x12_odds.get(k) or (None, None))[1]
+                for k in ("home", "draw", "away")} if x12_odds else None
+        s_pass, s_reason = screen.apply_x12(confidence, book, pick, scr, s)
     return X12PredictionRow(
         event_id=f["event_id"], predicted_at=now, p_home=round(p_home, 6),
         p_draw=round(p_draw, 6), p_away=round(p_away, 6),
         lambda_home=round(lam_h, 4), lambda_away=round(lam_a, 4),
         pick=pick, confidence=confidence, value_flag=value,
+        screen_pass=s_pass, screen_reason=s_reason,
         model_version=version, as_of_cutoff_ts=cutoff,
     )
 
@@ -227,7 +245,7 @@ def _pace_at(h2h_idx, f, cutoff) -> float:
 
 
 def _schedule_row(f, line, lam_h, lam_a, now, cutoff, version, s,
-                  maps, pace: float = 0.0) -> PredictionRow:
+                  maps, pace: float = 0.0, scr=None) -> PredictionRow:
     """Model-only prediction: same confidence scale as a priced row, but
     value_flag stays false (value needs a price to beat).
 
@@ -245,12 +263,18 @@ def _schedule_row(f, line, lam_h, lam_a, now, cutoff, version, s,
     pick = tier = None
     if confidence >= s.pick_prob_threshold and p_push <= s.max_push_prob:
         pick, tier = sel, _tier(confidence, s)
+    s_pass = s_reason = None
+    if pick is not None and scr is not None:
+        # no book on this population: the book rules self-skip on book_p=None
+        s_pass, s_reason = screen.apply_ou(line, confidence, tier, None,
+                                           scr, s)
     return PredictionRow(
         event_id=f["event_id"], predicted_at=now, totals_source=s.totals_source,
         line=line, p_over=round(p_over, 6), p_push=round(p_push, 6),
         p_under=round(p_under, 6), lambda_home=round(lam_h, 4),
         lambda_away=round(lam_a, 4), pick=pick, confidence=confidence,
-        tier=tier, value_flag=False, model_version=version,
+        tier=tier, value_flag=False, screen_pass=s_pass,
+        screen_reason=s_reason, model_version=version,
         as_of_cutoff_ts=cutoff,
     )
 
@@ -338,6 +362,13 @@ def run_cycle(conn, db_path, now: datetime | None = None) -> dict:
                                       h2h_idx=totals_idx)
                   if s.recal_enabled else {})
 
+    # Pick screen rolling stats (docs/PICK_SCREEN.md): four objects, one per
+    # (population, market), refit each cycle from settlements like the recal
+    # maps. None (screen off) leaves screen_pass/screen_reason NULL — the
+    # one-flag rollback. Cold-start stats pass everything (default-open).
+    scr = screen.fit_all(conn, s, now=now) if s.screen_enabled else {}
+    scr_get = scr.get  # {} -> every lookup None -> row builders skip
+
     # H2H stacker on the 1x2 head (docs/H2H_FEATURE.md). Per population,
     # never pooled; None (identity, no '-h2h' tag) until a population has
     # x12_h2h_min_n decisive graded rows.
@@ -378,14 +409,15 @@ def run_cycle(conn, db_path, now: datetime | None = None) -> dict:
             if "over" not in sels or "under" not in sels:
                 continue
             row = _line_row(f, line, sels, lam_h, lam_a, now, cutoff, version,
-                            s, maps, pace)
+                            s, maps, pace, scr=scr_get(("priced", "ou")))
             out.append(row)
             slate.append((f, line, row.pick, row.tier, row.p_over))
 
         if s.x12_enabled and lam_h is not None:
             x12_out.append(_x12_row(f, lam_h, lam_a, ev_odds["x12"], now,
                                     cutoff, version, s,
-                                    stack=h2h_stack, h2h_idx=h2h_idx))
+                                    stack=h2h_stack, h2h_idx=h2h_idx,
+                                    scr=scr_get(("priced", "x12"))))
 
     for f in scheduled:
         # home_raw here is built from matches.*_club, already canonical; the
@@ -403,13 +435,15 @@ def run_cycle(conn, db_path, now: datetime | None = None) -> dict:
         pace = _pace_at(totals_idx, f, cutoff)
         for dl in SCHEDULE_LINES_AROUND:
             row = _schedule_row(f, base + dl, lam_h, lam_a, now, cutoff,
-                                version, s, maps_sched, pace)
+                                version, s, maps_sched, pace,
+                                scr=scr_get(("schedule", "ou")))
             out.append(row)
             slate.append((f, row.line, row.pick, row.tier, row.p_over))
         if s.x12_enabled:  # no book 1x2 here -> value_flag stays False
             x12_out.append(_x12_row(f, lam_h, lam_a, {}, now, cutoff,
                                     version, s,
-                                    stack=h2h_stack_sched, h2h_idx=h2h_idx))
+                                    stack=h2h_stack_sched, h2h_idx=h2h_idx,
+                                    scr=scr_get(("schedule", "x12"))))
 
     n = PredictionRepo(conn).append_many(out)
     n_x12 = X12PredictionRepo(conn).append_many(x12_out) if x12_out else 0
@@ -432,6 +466,10 @@ def run_cycle(conn, db_path, now: datetime | None = None) -> dict:
                           "schedule": (h2h_stack_sched.n_fit
                                        if h2h_stack_sched else 0)},
             "unresolved_clubs": unresolved,
+            # advisory only (docs/PICK_SCREEN.md): picks the screen would
+            # veto; 0 with the screen off or cold
+            "screen_vetoed": sum(r.screen_pass == 0 for r in out)
+            + sum(r.screen_pass == 0 for r in x12_out),
             "elapsed_s": round(time.perf_counter() - t0, 2), "slate": slate}
 
 
@@ -451,6 +489,7 @@ def main(argv=None) -> int:
           f"pace_lines={rep.get('recal_pace_lines', [])} "
           f"pace_lines_sched={rep.get('recal_pace_lines_sched', [])} "
           f"x12_h2h_n={rep.get('x12_h2h_n', {})} "
+          f"screen_vetoed={rep.get('screen_vetoed', 0)} "
           f"elapsed={rep['elapsed_s']}s")
     if rep.get("unresolved_clubs"):
         print(f"  unresolved clubs (priced club-blind): "

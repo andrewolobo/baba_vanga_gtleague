@@ -31,6 +31,7 @@ from sklearn.linear_model import LogisticRegression
 from core.config import OFFSET_TOL_MIN, settings
 from core.markets import x12_probs
 from model import data, h2h, recal, registry
+from model import screen as screen_mod
 from model.blend import PMF_MAX_GOALS, blend_sides, totals_probs
 from model.heuristic import FormIndex
 from store import aliases
@@ -1095,10 +1096,167 @@ def _tier_section(df: pd.DataFrame, s, days: int, min_picks: int) -> list[str]:
     return out
 
 
+# ── pick screen report ───────────────────────────────────────────────────────
+#
+# The dark-phase judge for docs/PICK_SCREEN.md: per (population, market),
+# how did the screen's passed vs vetoed picks actually grade, per reason. The Phase 1 gate reads this report: vetoed
+# should sit >= 3 pts under passed (priced; schedule judged on direction),
+# veto volume <= ~25%, and a reason that vetoes winners gets loosened or
+# dropped. Also prints the rolling stats a cycle would serve from right now,
+# and the per-player counterfactual table (observation only — no player rule
+# ships until this table shows a stable offender at real n).
+#
+# Grading basis: settlements' own pick_correct — the HEADLINE picked row
+# (highest-confidence picked line of the graded batch), same dedup as the
+# scorecard. Non-headline picked lines carry screen columns too but have no
+# stored grade; they are the screen's accrual surface, not its judge.
+
+_SCREEN_QUERIES = {
+    ("priced", "ou"): """
+        SELECT s.event_id, s.pick_correct, p.pick, p.confidence,
+               p.screen_pass, p.screen_reason
+        FROM settlements s
+        JOIN fixtures f ON f.event_id = s.event_id
+        JOIN predictions p ON p.event_id = s.event_id
+         AND p.predicted_at = (SELECT MAX(predicted_at) FROM predictions
+                               WHERE event_id = s.event_id
+                               AND predicted_at < f.start_time_utc)
+        WHERE s.settled_at >= ?
+        ORDER BY s.event_id, (p.pick IS NULL), p.confidence DESC, p.line
+    """,
+    ("schedule", "ou"): """
+        SELECT s.event_id, s.pick_correct, p.pick, p.confidence,
+               p.screen_pass, p.screen_reason
+        FROM settlements s
+        JOIN matches m ON m.id = s.matched_match_id
+        JOIN predictions p ON p.event_id = s.event_id
+         AND p.predicted_at = (SELECT MAX(predicted_at) FROM predictions
+                               WHERE event_id = s.event_id
+                               AND predicted_at < m.kickoff_ts)
+        WHERE s.settled_at >= ? AND s.event_id LIKE 'gtl:%'
+        ORDER BY s.event_id, (p.pick IS NULL), p.confidence DESC, p.line
+    """,
+    ("priced", "x12"): """
+        SELECT s.event_id, s.pick_correct, p.pick, p.confidence,
+               p.screen_pass, p.screen_reason
+        FROM settlements_x12 s
+        JOIN fixtures f ON f.event_id = s.event_id
+        JOIN predictions_x12 p ON p.event_id = s.event_id
+         AND p.predicted_at = (SELECT MAX(predicted_at) FROM predictions_x12
+                               WHERE event_id = s.event_id
+                               AND predicted_at < f.start_time_utc)
+        WHERE s.settled_at >= ?
+    """,
+    ("schedule", "x12"): """
+        SELECT s.event_id, s.pick_correct, p.pick, p.confidence,
+               p.screen_pass, p.screen_reason
+        FROM settlements_x12 s
+        JOIN matches m ON m.id = s.matched_match_id
+        JOIN predictions_x12 p ON p.event_id = s.event_id
+         AND p.predicted_at = (SELECT MAX(predicted_at) FROM predictions_x12
+                               WHERE event_id = s.event_id
+                               AND predicted_at < m.kickoff_ts)
+        WHERE s.settled_at >= ? AND s.event_id LIKE 'gtl:%'
+    """,
+}
+
+# per-player counterfactual (priced, totals): the model's lean on every
+# settled line, graded against the result — the observation table that
+# decides whether a player rule ever earns a v2 slot.
+_SCREEN_PLAYER_QUERY = """
+    SELECT f.home_player, f.away_player, p.line, p.p_over, p.p_under,
+           s.result_total
+    FROM settlements s
+    JOIN fixtures f ON f.event_id = s.event_id
+    JOIN predictions p ON p.event_id = s.event_id
+     AND p.predicted_at = (SELECT MAX(predicted_at) FROM predictions
+                           WHERE event_id = s.event_id
+                           AND predicted_at < f.start_time_utc)
+    WHERE s.settled_at >= ? AND s.leak_risk = 0
+      AND s.result_total IS NOT NULL AND p.lambda_home IS NOT NULL
+      AND s.result_total != p.line
+"""
+
+
+def _screen_verdict_section(df: pd.DataFrame) -> list[str]:
+    df = df.drop_duplicates(subset="event_id", keep="first")
+    df = df[df["pick"].notna() & df["screen_pass"].notna()]
+    if df.empty:
+        return ["no screened picks in window (screen off or pre-feature rows)"]
+    graded = df[df["pick_correct"].notna()]
+
+    def cell(g):
+        return (f"{g['pick_correct'].mean():.1%} ({len(g)})"
+                if len(g) else "-- (0)")
+
+    lines = [f"screened picks: {len(df)} | graded: {len(graded)}"
+             f" | vetoed: {int((df['screen_pass'] == 0).sum())}"
+             f" ({(df['screen_pass'] == 0).mean():.0%} of picks)"]
+    for label, val in (("passed", 1), ("vetoed", 0)):
+        lines.append(
+            f"  {label:>7}: hit {cell(graded[graded['screen_pass'] == val])}")
+    for reason, g in graded[graded["screen_pass"] == 0].groupby("screen_reason"):
+        lines.append(f"    {reason:>14}: hit {cell(g)}")
+    return lines
+
+
+def _screen_stats_section(st) -> list[str]:
+    out = []
+    if st.line_hit:
+        cells = ", ".join(f"{li:g}: {h}/{n}" for li, (h, n)
+                          in sorted(st.line_hit.items()))
+        out.append(f"  line_hit  {cells}")
+    if st.band_hit:
+        order = [b[0] for b in screen_mod.EDGE_BANDS]
+        cells = ", ".join(f"{b}: {st.band_hit[b][0]}/{st.band_hit[b][1]}"
+                          for b in order if b in st.band_hit)
+        out.append(f"  band_hit  {cells}")
+    h, n = st.trailing
+    out.append(f"  trailing  {h}/{n}" + ("" if n else " (cold)"))
+    return out
+
+
+def screen_report(conn, days: int = 7) -> str:
+    s = settings()
+    since = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+    stats = screen_mod.fit_all(conn, s)
+    out: list[str] = []
+    for pop, mkt in (("priced", "ou"), ("schedule", "ou"),
+                     ("priced", "x12"), ("schedule", "x12")):
+        out.append(f"== {pop} / {mkt} ==")
+        df = pd.read_sql_query(_SCREEN_QUERIES[(pop, mkt)], conn,
+                               params=(since,))
+        out += _screen_verdict_section(df)
+        out.append("rolling stats a cycle would serve from now"
+                   f" (window {s.screen_days}d):")
+        out += _screen_stats_section(stats[(pop, mkt)])
+        out.append("")
+
+    ph: dict[str, list[int]] = {}
+    for r in conn.execute(_SCREEN_PLAYER_QUERY, (since,)):
+        hit = int((r["result_total"] > r["line"])
+                  == (r["p_over"] > r["p_under"]))
+        for pl in (r["home_player"], r["away_player"]):
+            ph.setdefault(pl, []).append(hit)
+    rows = sorted(((sum(v) / len(v), len(v), p) for p, v in ph.items()
+                   if len(v) >= 30))
+    out.append("== per-player counterfactual (priced ou, n >= 30;"
+               " observation only) ==")
+    if rows:
+        worst, best = rows[:5], rows[-5:][::-1]
+        out.append("  worst: " + ", ".join(f"{p} {r:.0%} ({n})"
+                                           for r, n, p in worst))
+        out.append("  best:  " + ", ".join(f"{p} {r:.0%} ({n})"
+                                           for r, n, p in best))
+    else:
+        out.append("  no players at n >= 30 in window")
+    return "\n".join(out).rstrip()
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(prog="settlement.settle")
     ap.add_argument("cmd", choices=["run", "scorecard", "vs-book",
-                                    "x12-vs-book", "tiers"])
+                                    "x12-vs-book", "tiers", "screen"])
     ap.add_argument("--db", default=None)
     ap.add_argument("--days", type=int, default=7)
     ap.add_argument("--boot", type=int, default=2000,
@@ -1138,6 +1296,9 @@ def main(argv=None) -> int:
         return 0
     if args.cmd == "tiers":
         print(tier_bands(conn, args.days))
+        return 0
+    if args.cmd == "screen":
+        print(screen_report(conn, args.days))
         return 0
     print(scorecard(conn, args.days))
     return 0
