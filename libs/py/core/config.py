@@ -146,6 +146,15 @@ class Settings(BaseSettings):
     # drawdown breaker: trailing served-pick hit over the last N graded
     screen_trailing_n: int = 50
     screen_breaker_floor: float = 0.45
+    # value_flag EV gate (docs/VALUE_FLAG.md): the legacy edge-only rule is
+    # inverted (measured 2026-07-19: flagged rows 49.4% hit, -7.7% ROI).
+    # When enabled, value additionally requires the row's edge band's rolling
+    # hit (ScreenStats.band_hit, n >= screen_min_n_band) to clear the row's
+    # own break-even: band_hit >= 1/odds + margin. Rows the gate engaged on
+    # carry '-ev'; cold stats fall back to the legacy rule, untagged.
+    # Default OFF — enabling is a deploy decision (timer live-switch caveat).
+    value_ev_enabled: bool = False
+    value_ev_margin: float = 0.0
     # Tier bands partition the picked region [pick_prob_threshold, 1]. Keep
     # tier_lean == pick_prob_threshold: a band below the gate can never be
     # assigned, because _tier only runs once the gate has passed.

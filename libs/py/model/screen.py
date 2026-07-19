@@ -129,6 +129,35 @@ def _drawdown(stats: ScreenStats, s) -> bool:
     return n >= s.screen_trailing_n and hits / n < s.screen_breaker_floor
 
 
+# ── value_flag EV gate (docs/VALUE_FLAG.md) ─────────────────────────────────
+#
+# Not part of the veto cascade: value is a positive claim on a row, screened
+# or not, and it rides the same band stats rather than growing its own.
+
+
+def value_ev(model_p: float, book_p: float | None, odds: float | None,
+             stats: ScreenStats | None, s) -> tuple[bool, bool]:
+    """(value_flag, engaged) for one leaned side.
+
+    Engaged iff the EV gate can actually be consulted: flag on, band stats
+    warm, a real book prob and a sane price (odds < 1.01 is junk data, not a
+    price). Otherwise the LEGACY edge rule fires, engaged=False — the
+    caller tags '-ev' only on engaged rows, and value_ev_enabled=true never
+    silently mutes the flag on a cold start. The legacy expression keeps the
+    historical `or 0.0` book fallback byte-for-byte."""
+    legacy = (model_p - (book_p or 0.0)) >= s.min_edge
+    if not (s.value_ev_enabled and stats is not None and stats.band_hit
+            and book_p is not None and odds is not None and odds >= 1.01):
+        return legacy, False
+    edge = model_p - book_p
+    if edge < s.min_edge:
+        return False, True
+    hn = stats.band_hit.get(edge_band(edge))
+    if hn is None or hn[1] < s.screen_min_n_band:
+        return False, True  # a value claim needs band-level evidence
+    return hn[0] / hn[1] >= 1.0 / odds + s.value_ev_margin, True
+
+
 # ── rolling stats ────────────────────────────────────────────────────────────
 #
 # Same joins as recal's fit queries / settle's _VS_BOOK_QUERY: the last

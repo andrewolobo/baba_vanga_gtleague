@@ -769,8 +769,13 @@ def vs_book(conn, days: int = 7, boot: int = 2000, seed: int = 0,
 
     out += ["", "by line"] + _breakdown(df, "line", fmt=lambda v: f"{v:g}")
     out += ["", "by tier"] + _breakdown(df, "tier")
-    out += ["", "by value flag"] + _breakdown(
-        df, "value_flag", fmt=lambda v: "value" if v else "no value")
+    # '-ev' rows carry EV-gated value semantics (docs/VALUE_FLAG.md); rows
+    # without it carry the legacy edge-only rule — never pool the regimes
+    # when judging the flag
+    df["vf"] = np.where(df["value_flag"] == 1, "value", "no value") \
+        + np.where(df["model_version"].str.contains("-ev"), " (ev)", "")
+    out += ["", "by value flag (regime-split: '(ev)' = EV-gated rows)"] \
+        + _breakdown(df, "vf")
 
     picked = df[df["pick"].notna()].copy()
     if len(picked):
@@ -967,8 +972,11 @@ def x12_vs_book(conn, days: int = 7, boot: int = 2000, seed: int = 0,
     df["h2h"] = np.where(df["model_version"].str.contains("-h2h"),
                          "h2h", "pre-h2h")
     out += ["", "by pick"] + _x12_breakdown(df, "pick")
-    out += ["", "by value flag"] + _x12_breakdown(
-        df, "value_flag", fmt=lambda v: "value" if v else "no value")
+    # same regime split as the totals report (docs/VALUE_FLAG.md)
+    df["vf"] = np.where(df["value_flag"] == 1, "value", "no value") \
+        + np.where(df["model_version"].str.contains("-ev"), " (ev)", "")
+    out += ["", "by value flag (regime-split: '(ev)' = EV-gated rows)"] \
+        + _x12_breakdown(df, "vf")
     out += ["", "by h2h regime (rows the stacker touched carry -h2h)"] \
         + _x12_breakdown(df, "h2h")
     out += ["", "roi = flat 1u on the model's argmax at the closing price,"

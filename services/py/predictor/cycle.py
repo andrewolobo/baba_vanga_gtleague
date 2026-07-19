@@ -140,7 +140,6 @@ def _line_row(f, line, sels, lam_h, lam_a, now, cutoff, version, s,
     if covered:
         sel = "over" if p_over > p_under else "under"
         model_p = p_over if sel == "over" else p_under
-        book_p = (book_over if sel == "over" else book_under) or 0.0
         # Confidence is the model's own probability, never blended with the
         # book's. The book prices the main line at ~0.5 by construction, so
         # averaging it in only shrinks every book-priced row halfway to a
@@ -148,7 +147,16 @@ def _line_row(f, line, sels, lam_h, lam_a, now, cutoff, version, s,
         # schedule-only row. The book's information enters through value_flag,
         # which is where a price belongs.
         confidence = round(model_p, 6)
-        value = (model_p - book_p) >= s.min_edge
+        # EV-gated when engaged (docs/VALUE_FLAG.md), legacy edge rule
+        # otherwise; the '-ev' tag marks which semantics this row carries.
+        # book basis is the leaned side's UN-defaulted implied prob — the
+        # gate must see "no price" as no price, not as prob 0.
+        value, ev_engaged = screen.value_ev(
+            model_p, book_over if sel == "over" else book_under,
+            (sels["over"] if sel == "over" else sels["under"])[0],
+            scr, s)
+        if ev_engaged:
+            version = version + "-ev"
         # a pick is only surfaced above the parent-validated probability gate
         # (0.60) — near-coin-flip calls stay pick-less.
         # The maps clause is priced-population doctrine (docs/POPULATION_SPLIT.md):
@@ -165,8 +173,9 @@ def _line_row(f, line, sels, lam_h, lam_a, now, cutoff, version, s,
     s_pass = s_reason = None
     if pick is not None and scr is not None:
         # the screen's book basis is the picked side's implied prob, None
-        # when the book never priced it (unlike value's `or 0.0` fallback:
-        # a missing price must skip the book rules, not read as opposition)
+        # when the book never priced it (unlike value_ev's legacy-path
+        # `or 0.0`: a missing price must skip the book rules, not read as
+        # opposition)
         s_pass, s_reason = screen.apply_ou(
             line, confidence, tier,
             book_over if pick == "over" else book_under, scr, s)
@@ -212,8 +221,15 @@ def _x12_row(f, lam_h, lam_a, x12_odds, now, cutoff, version, s,
     value = False
     if probs[sel] >= s.x12_pick_prob_threshold:
         pick, confidence = sel, round(probs[sel], 6)
-        book_p = (x12_odds.get(sel) or (None, None))[1]
-        value = book_p is not None and (probs[sel] - book_p) >= s.min_edge
+        book_odds, book_p = x12_odds.get(sel) or (None, None)
+        if book_p is not None:
+            # EV-gated when engaged (docs/VALUE_FLAG.md) — same helper and
+            # '-ev' contract as the totals rows; unpriced (schedule) rows
+            # keep value False without consulting the gate, as before
+            value, ev_engaged = screen.value_ev(probs[sel], book_p,
+                                                book_odds, scr, s)
+            if ev_engaged:
+                version = version + "-ev"
     s_pass = s_reason = None
     if pick is not None and scr is not None:
         book = {k: (x12_odds.get(k) or (None, None))[1]
