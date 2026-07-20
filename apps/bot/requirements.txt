@@ -1,0 +1,4 @@
+# apps/bot — strong-pick Telegram alert bot. Deliberately tiny: it READS the
+# predictions/fixtures tables (via the shared store package) and POSTs to the
+# Telegram Bot API over httpx. No standalone deps — httpx and pydantic-settings
+# already come from the root project (pyproject.toml); this file is just a note.

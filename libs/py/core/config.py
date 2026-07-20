@@ -167,6 +167,21 @@ class Settings(BaseSettings):
     tier_solid: float = 0.64  # 37%
     tier_strong: float = 0.69  # top 17% — 'strong' has to stay selective
 
+    # Telegram strong-pick alerts (docs/ALERTS.md): a push-only bot that
+    # broadcasts newly-surfaced 'strong' Over/Under picks on book-priced
+    # fixtures to one channel/group. Runs as the `alert` job the Node scheduler
+    # chains after each predict cycle; ALERTS_ENABLED=false is the one-flag
+    # rollback and the default. Same live-switch caveat as every flag — the job
+    # re-reads these on each spawn, so flipping the env takes effect on the next
+    # cycle with no restart. De-dup lives in the alerts_sent table, so a flapped
+    # flag never re-blasts a pick already sent.
+    alerts_enabled: bool = False
+    telegram_bot_token: str = ""      # from @BotFather
+    telegram_chat_id: str = ""        # target channel/group id (-100… or @name)
+    alerts_web_url: str = ""          # optional dashboard link button in the post
+    alerts_tier: str = "strong"       # served tier that triggers an alert
+    alerts_max_per_run: int = 20      # safety cap on messages sent in one run
+
     @property
     def market_type_list(self) -> list[str]:
         return [m.strip() for m in self.betpawa_market_types.split(",") if m.strip()]

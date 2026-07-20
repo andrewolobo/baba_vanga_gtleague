@@ -11,7 +11,8 @@ const PYTHON = process.env.GTL_PYTHON
 
 const MIN = 60_000;
 
-type JobName = 'catchup' | 'results' | 'odds' | 'predict' | 'settle' | 'backup';
+type JobName = 'catchup' | 'results' | 'odds' | 'predict' | 'settle'
+             | 'backup' | 'alert';
 
 interface JobSpec {
   args: string[];
@@ -25,11 +26,15 @@ const SPECS: Record<JobName, JobSpec> = {
              everyMs: 10 * MIN, onSuccess: ['predict', 'settle'] },
   odds:    { args: ['-m', 'odds_ingest.cli', 'fetch'],
              everyMs: 5 * MIN, onSuccess: ['predict'] },
-  predict: { args: ['-m', 'predictor.cycle'], everyMs: 0, onSuccess: [] },
+  predict: { args: ['-m', 'predictor.cycle'], everyMs: 0, onSuccess: ['alert'] },
   settle:  { args: ['-m', 'settlement.settle', 'run'], everyMs: 15 * MIN,
              onSuccess: [] },
   backup:  { args: ['-m', 'store.backup'], everyMs: 24 * 60 * MIN,
              onSuccess: [] },
+  // Fires after every predict cycle. Reads the fresh predictions and pushes any
+  // newly-surfaced strong O/U pick to Telegram; a fast no-op (exit 0) when
+  // ALERTS_ENABLED=false, so leaving it chained costs nothing until enabled.
+  alert:   { args: ['-m', 'apps.bot', 'run'], everyMs: 0, onSuccess: [] },
 };
 
 /** Days of finished results missing from the DB (0 = current). Downtime
