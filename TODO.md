@@ -52,22 +52,22 @@ live switch — serving flipped on the first cycle after the code landed.
 
 - [x] **Enable the 1x2 head** — DONE 2026-07-12 (`X12_ENABLED=true` in
       `.env`; accrues dark). Rollback: set false.
-- [ ] **Enable the H2H stacker** (docs/H2H_FEATURE.md §Enabling) — the next
+- [x] **Enable the H2H stacker** (docs/H2H_FEATURE.md §Enabling) — the next
       action, in order:
-      1. Wait for both populations to clear `X12_H2H_MIN_N=500` decisive
-         graded rows — check `x12_h2h_n={'priced': …, 'schedule': …}` in
-         cycle stdout (2026-07-13 baseline: 184 / 228; ~2–3 days at current
-         volume). Flipping early is safe but serves identity, untagged.
-      2. Add `X12_H2H_ENABLED=true` to `.env` (needs `X12_ENABLED=true`,
-         already set). Live switch: next timer cycle, no deploy.
-      3. Confirm engagement: `-h2h` suffix on new `predictions_x12`
-         model_versions, nonzero `x12_h2h_n` both populations.
-      Rollback: set false — tagged rows regen through identity by design
-      (test-covered), so a post-rollback `regen_agrees` dip on near-gate
-      picks is expected drift, not leakage.
-      Note 2026-07-13: `fit_stacker` was switched to the raw λ-basis fit
-      (the recal closed-loop fix, see IMPORTANT above) before enablement —
-      the x12 fit pool was never contaminated; no extra step needed here.
+  1. Wait for both populations to clear `X12_H2H_MIN_N=500` decisive
+     graded rows — check `x12_h2h_n={'priced': …, 'schedule': …}` in
+     cycle stdout (2026-07-13 baseline: 184 / 228; ~2–3 days at current
+     volume). Flipping early is safe but serves identity, untagged.
+  2. Add `X12_H2H_ENABLED=true` to `.env` (needs `X12_ENABLED=true`,
+     already set). Live switch: next timer cycle, no deploy.
+  3. Confirm engagement: `-h2h` suffix on new `predictions_x12`
+     model_versions, nonzero `x12_h2h_n` both populations.
+     Rollback: set false — tagged rows regen through identity by design
+     (test-covered), so a post-rollback `regen_agrees` dip on near-gate
+     picks is expected drift, not leakage.
+     Note 2026-07-13: `fit_stacker` was switched to the raw λ-basis fit
+     (the recal closed-loop fix, see IMPORTANT above) before enablement —
+     the x12 fit pool was never contaminated; no extra step needed here.
 
 ## Watch (blocked on data accruing, in likely unblock order)
 
@@ -142,8 +142,7 @@ live switch — serving flipped on the first cycle after the code landed.
 ## Build (when data or priorities allow)
 
 - [x] **H2H Phase 1 (measurement harness)** — DONE 2026-07-13:
-      `model/h2h.py` (H2HIndex + stacker math), `python -m model.evaluate
-      h2h` (gate with skill/pace control arms, split-half, half-life x
+      `model/h2h.py` (H2HIndex + stacker math), `python -m model.evaluate h2h` (gate with skill/pace control arms, split-half, half-life x
       shrinkage sweep, `model_runs` kind `h2h`), `tests/test_h2h.py`.
       Gate PASSED on both markets — 1x2 +2.9 AUC pts (pairwise increment
       +2.3 over the skill control), totals pair-pace +1.1…+1.7 pts every
@@ -160,8 +159,7 @@ live switch — serving flipped on the first cycle after the code landed.
 - [ ] **1x2 vs-book scorecard** — analogue of `settle vs-book` over
       `settlements_x12`; the edge-coefficient regression is the test that
       matters. Needs a few thousand graded rows to resolve.
-- [ ] **x12 tier bands** — derive from served x12 confidence the `settle
-      tiers` way. Never from the eval frame (documented trap).
+- [ ] **x12 tier bands** — derive from served x12 confidence the `settle tiers` way. Never from the eval frame (documented trap).
 - [ ] **API/UI exposure of 1x2** — `services/api/src/routes.ts` only reads
       `predictions`; `predictions_x12` is invisible to the web app until an
       endpoint + UI section exist. Fine to accrue a dark track record first.

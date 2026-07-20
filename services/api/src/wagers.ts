@@ -29,16 +29,28 @@ interface LegRow {
 type LegOutcome = 'pending' | 'won' | 'lost' | 'push' | 'void';
 type WagerStatus = 'open' | 'won' | 'lost';
 
+// A cancelled game never gets a settlement row, so "pending" alone would
+// strand its wager open forever (and past kickoff, uncancellable). Legs with
+// no result this long after kickoff grade void (odds 1.0) instead. Safe
+// because grades are derived at read time: if a late settlement lands (e.g.
+// the boot-time results catch-up), the real outcome overrides the void.
+// 6h: the book only prices ~2h out and results land within ~1h of kickoff,
+// so anything still unsettled by then is a cancellation, not latency.
+const STALE_VOID_MS = 6 * 3_600_000;
+const staleVoid = (kickoff: string | null) =>
+  kickoff != null && kickoff < new Date(Date.now() - STALE_VOID_MS).toISOString();
+
 // Derived grade for one leg. Cancelled match (status 4) voids the leg (odds
-// 1.0); no settlement row yet = pending; otherwise the totals/1x2 result
-// decides it. Never reads a stored grade — there is none.
-function legOutcome(leg: LegRow): LegOutcome {
+// 1.0); no settlement row yet = pending until stale-void; otherwise the
+// totals/1x2 result decides it. Never reads a stored grade — there is none.
+function legOutcome(leg: LegRow, kickoff: string | null): LegOutcome {
+  const unsettled = () => staleVoid(kickoff) ? 'void' : 'pending';
   if (leg.market === '1x2') {
     const s = one<{ result: string; match_status: number | null }>(
       `SELECT s.result, m.status AS match_status FROM settlements_x12 s
        LEFT JOIN matches m ON m.id = s.matched_match_id WHERE s.event_id = ?`,
       leg.event_id);
-    if (!s) return 'pending';
+    if (!s) return unsettled();
     if (s.match_status === 4) return 'void';
     return s.result === leg.selection ? 'won' : 'lost';
   }
@@ -46,9 +58,9 @@ function legOutcome(leg: LegRow): LegOutcome {
     `SELECT s.result_total, m.status AS match_status FROM settlements s
      LEFT JOIN matches m ON m.id = s.matched_match_id WHERE s.event_id = ?`,
     leg.event_id);
-  if (!s) return 'pending';
+  if (!s) return unsettled();
   if (s.match_status === 4) return 'void';
-  if (s.result_total == null) return 'pending';
+  if (s.result_total == null) return unsettled();
   if (s.result_total === leg.line) return 'push';
   const overWon = s.result_total > (leg.line ?? 0);
   const won = leg.selection === 'over' ? overWon : !overWon;
@@ -79,12 +91,15 @@ function payoutOf(status: WagerStatus, stake: number, legs: LegRow[],
 function shapeWager(w: WagerRow) {
   const legRows = all<LegRow>(
     'SELECT * FROM wager_legs WHERE wager_id = ? ORDER BY id', w.id);
-  const outcomes = legRows.map(legOutcome);
+  const fixtures = legRows.map((leg) =>
+    one<{ start_time_utc: string; home_raw: string; away_raw: string }>(
+      'SELECT start_time_utc, home_raw, away_raw FROM fixtures WHERE event_id = ?',
+      leg.event_id));
+  const outcomes = legRows.map((leg, i) =>
+    legOutcome(leg, fixtures[i]?.start_time_utc ?? null));
   const status = wagerStatus(outcomes);
   const legs = legRows.map((leg, i) => {
-    const fx = one<{ start_time_utc: string; home_raw: string; away_raw: string }>(
-      'SELECT start_time_utc, home_raw, away_raw FROM fixtures WHERE event_id = ?',
-      leg.event_id);
+    const fx = fixtures[i];
     return {
       event_id: leg.event_id, market: leg.market, line: leg.line,
       selection: leg.selection, odds: leg.odds, outcome: outcomes[i],
