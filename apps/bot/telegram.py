@@ -21,9 +21,10 @@ def _api_url(token: str, method: str) -> str:
     return f"{TELEGRAM_API_BASE}/bot{token}/{method}"
 
 
-def url_button_markup(label: str, url: str) -> dict:
-    """An inline keyboard holding a single tappable URL button."""
-    return {"inline_keyboard": [[{"text": label, "url": url}]]}
+def url_buttons_markup(buttons: list[tuple[str, str]]) -> dict:
+    """An inline keyboard of tappable URL buttons, one (label, url) per row."""
+    return {"inline_keyboard": [[{"text": label, "url": url}]
+                                for label, url in buttons]}
 
 
 def send_message(
@@ -36,7 +37,7 @@ def send_message(
 ) -> dict:
     """Post one message to ``chat_id``; return the Telegram ``result`` object.
 
-    Pass ``reply_markup`` (e.g. from :func:`url_button_markup`) to attach an
+    Pass ``reply_markup`` (e.g. from :func:`url_buttons_markup`) to attach an
     inline keyboard. Raises :class:`TelegramError` carrying the API's description
     on failure (e.g. the bot is not an admin of the channel, or the chat id is
     wrong).

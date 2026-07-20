@@ -20,6 +20,9 @@ so `npm run dev` / `npm run start` is all you need — no extra command, no cron
   a flipped side or a newly-strong line is a fresh key and fires again.
 - Scope is **priced-only**: schedule-only `gtl:` predictions have no bettable
   line and are never alerted.
+- Every alert carries a **🎟 Bet on betPawa** button deep-linking to that event's
+  betting page (`{BETPAWA_BASE}/event/{event_id}?filter=all` — `fixtures.event_id`
+  *is* the betPawa event id), plus an optional dashboard button.
 
 It never long-polls and runs no webhook — the only Bot API call on the normal
 path is `sendMessage`. `getUpdates` is used solely by the `--print-updates`
@@ -100,7 +103,8 @@ Run from the **repo root** using the project venv:
 apps/bot/
   config.py     Telegram credentials + message constants (from core.config)
   telegram.py   push-only sendMessage (+ getUpdates for --print-updates setup)
-  alerts.py     pure DB: select headline strong picks, de-dupe, record sent
+  alerts.py     pure DB: select headline strong picks, de-dupe, record sent,
+                build the betPawa event deep link
   format.py     pure, network-free render of one pick -> an HTML message
   main.py       CLI: select -> dry-run print | send + record
   __main__.py   enables `python -m apps.bot`

@@ -80,8 +80,18 @@ Entertainment only. Bet responsibly.
 
 The book-odds line is enrichment from the latest snapshot for the picked side;
 it's omitted if the side isn't priced. `value ✓` shows when the row's
-`value_flag` is set. An "Open the dashboard" button is appended when
-`ALERTS_WEB_URL` is set.
+`value_flag` is set.
+
+### Buttons
+
+Each alert carries inline URL buttons, actionable link first:
+
+1. **🎟 Bet on betPawa** — deep link straight to the event's betting page,
+   `{BETPAWA_BASE}/event/{event_id}?filter=all`. `fixtures.event_id` **is** the
+   betPawa event id for priced rows (the odds feed writes it verbatim), so no
+   extra lookup or column is needed. Always present, since alerts are
+   priced-only; schedule-only `gtl:` ids resolve to no URL by design.
+2. **Open the dashboard** — only when `ALERTS_WEB_URL` is set.
 
 ## Rollback
 

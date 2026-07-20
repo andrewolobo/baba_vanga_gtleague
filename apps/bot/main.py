@@ -28,7 +28,7 @@ from store.db import connect
 
 from . import alerts, config
 from .format import render_alert
-from .telegram import TelegramError, get_updates, send_message, url_button_markup
+from .telegram import TelegramError, get_updates, send_message, url_buttons_markup
 
 
 def parse_args(argv=None) -> argparse.Namespace:
@@ -91,20 +91,39 @@ def _print_updates(token: str) -> int:
     return 0
 
 
-def _link_button() -> tuple[dict | None, str | None]:
-    """Optional inline URL button linking to the web dashboard (ALERTS_WEB_URL)."""
+def _dashboard_button() -> tuple[str, str] | None:
+    """(label, url) for the optional dashboard button (ALERTS_WEB_URL), or None.
+
+    Resolved once per run — the URL is global, unlike the per-event betPawa link
+    — so a misconfigured value warns once instead of once per message.
+    """
     website = config.website_url()
-    if website and website.startswith(("http://", "https://")):
-        return url_button_markup(config.WEBSITE_BUTTON_LABEL, website), website
-    if website:
+    if not website:
+        return None
+    if not website.startswith(("http://", "https://")):
         print(f"Warning: ALERTS_WEB_URL={website!r} is not an http(s) URL; "
               "skipping the link button.", file=sys.stderr)
-    return None, website
+        return None
+    return (config.WEBSITE_BUTTON_LABEL, website)
+
+
+def _buttons(c: dict, dashboard: tuple[str, str] | None) -> list[tuple[str, str]]:
+    """Inline buttons for one alert: the betPawa event page first (the
+    actionable link — straight to the wager), then the optional dashboard."""
+    buttons = []
+    if c.get("bet_url"):
+        buttons.append((config.BETPAWA_BUTTON_LABEL, c["bet_url"]))
+    if dashboard:
+        buttons.append(dashboard)
+    return buttons
 
 
 def _dry_run(capped: list[dict], total: int, cap: int, now: datetime) -> int:
+    dashboard = _dashboard_button()
     for c in capped:
         print(render_alert(c, now=now))
+        for label, url in _buttons(c, dashboard):
+            print(f"[{label}] -> {url}")
         print("—")
     print(f"[dry-run] {total} new strong pick(s); {len(capped)} within cap "
           f"{cap}. Nothing sent.", file=sys.stderr)
@@ -115,12 +134,14 @@ def _broadcast(conn, capped: list[dict], token: str, chat_id: str,
                now: datetime) -> tuple[int, int]:
     """Send each candidate; record only confirmed sends so a failed pick stays a
     candidate and retries next cycle. Returns (sent, failed)."""
-    reply_markup, _ = _link_button()
+    dashboard = _dashboard_button()
     sent = failed = 0
     for c in capped:
+        buttons = _buttons(c, dashboard)
         try:
-            result = send_message(token, chat_id, render_alert(c, now=now),
-                                  reply_markup=reply_markup)
+            result = send_message(
+                token, chat_id, render_alert(c, now=now),
+                reply_markup=url_buttons_markup(buttons) if buttons else None)
         except (TelegramError, httpx.HTTPError) as exc:
             print(f"send failed for {c['event_id']} {c['selection']} "
                   f"{c['line']}: {exc}", file=sys.stderr)

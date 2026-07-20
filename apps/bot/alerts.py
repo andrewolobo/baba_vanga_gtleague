@@ -28,6 +28,19 @@ def _club(raw: str | None) -> str:
     return _STRIP_PLAYER.sub("", raw).strip() or raw
 
 
+def _bet_url(s: Settings, event_id: str) -> str | None:
+    """Deep link to the fixture's betPawa event page.
+
+    ``fixtures.event_id`` IS the betPawa event id for priced rows (the odds feed
+    writes it verbatim), so the page is just the base + id. Schedule-only
+    ``gtl:`` events have no betPawa page — they are already out of scope, but
+    the guard keeps the helper honest if that ever changes.
+    """
+    if not event_id or event_id.startswith("gtl:"):
+        return None
+    return f"{s.betpawa_base.rstrip('/')}/event/{event_id}?filter=all"
+
+
 def _latest_side_odds(conn: sqlite3.Connection, event_id: str, line: float,
                       selection: str) -> float | None:
     """Latest snapshotted book odds for the picked side — enriches the message
@@ -40,7 +53,7 @@ def _latest_side_odds(conn: sqlite3.Connection, event_id: str, line: float,
     return row["odds"] if row else None
 
 
-def _shape(conn: sqlite3.Connection, r: sqlite3.Row) -> dict:
+def _shape(conn: sqlite3.Connection, r: sqlite3.Row, s: Settings) -> dict:
     return {
         "event_id": r["event_id"], "line": r["line"], "selection": r["selection"],
         "confidence": r["confidence"], "tier": r["tier"],
@@ -50,6 +63,7 @@ def _shape(conn: sqlite3.Connection, r: sqlite3.Row) -> dict:
         "away_club": _club(r["away_raw"]), "away_player": r["away_player"],
         "book_odds": _latest_side_odds(conn, r["event_id"], r["line"],
                                        r["selection"]),
+        "bet_url": _bet_url(s, r["event_id"]),
     }
 
 
@@ -88,7 +102,7 @@ def candidates(conn: sqlite3.Connection, s: Settings,
         if r["event_id"] in seen:
             continue
         seen.add(r["event_id"])
-        out.append(_shape(conn, r))
+        out.append(_shape(conn, r, s))
     return out
 
 

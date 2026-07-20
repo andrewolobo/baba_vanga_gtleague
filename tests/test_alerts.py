@@ -114,6 +114,47 @@ def test_alerts_tier_setting_is_respected(seeded, monkeypatch):
     assert events == {"E2"}            # now only the solid pick qualifies
 
 
+def test_bet_url_is_the_betpawa_event_page():
+    s = settings()
+    # fixtures.event_id IS the betPawa event id for priced rows
+    assert alerts._bet_url(s, "36717993") == \
+        "https://www.betpawa.ug/event/36717993?filter=all"
+    assert alerts._bet_url(s, "gtl:S1") is None   # no betPawa page for schedule
+    assert alerts._bet_url(s, "") is None
+
+
+def test_bet_url_tolerates_a_trailing_slash_on_the_base(monkeypatch):
+    s = settings()
+    monkeypatch.setattr(s, "betpawa_base", "https://www.betpawa.ug/")
+    assert alerts._bet_url(s, "123") == "https://www.betpawa.ug/event/123?filter=all"
+
+
+def test_candidates_carry_the_bet_url(seeded):
+    c = alerts.candidates(seeded, settings(), now=NOW)[0]
+    assert c["bet_url"] == "https://www.betpawa.ug/event/E1?filter=all"
+
+
+def test_buttons_put_betpawa_first_then_dashboard():
+    from apps.bot import config as bot_config
+    from apps.bot.main import _buttons
+
+    c = {"bet_url": "https://www.betpawa.ug/event/1?filter=all"}
+    dash = ("Open the dashboard", "https://dash/")
+    assert _buttons(c, dash) == [
+        (bot_config.BETPAWA_BUTTON_LABEL, c["bet_url"]), dash]
+    assert _buttons(c, None) == [(bot_config.BETPAWA_BUTTON_LABEL, c["bet_url"])]
+    assert _buttons({"bet_url": None}, dash) == [dash]
+    assert _buttons({"bet_url": None}, None) == []
+
+
+def test_url_buttons_markup_is_one_button_per_row():
+    from apps.bot.telegram import url_buttons_markup
+
+    assert url_buttons_markup([("A", "https://a/"), ("B", "https://b/")]) == {
+        "inline_keyboard": [[{"text": "A", "url": "https://a/"}],
+                            [{"text": "B", "url": "https://b/"}]]}
+
+
 def test_render_alert_contains_the_essentials():
     c = {
         "event_id": "E1", "line": 3.5, "selection": "over", "confidence": 0.71,

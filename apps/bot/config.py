@@ -17,6 +17,7 @@ PARSE_MODE = "HTML"  # forgiving vs MarkdownV2; we only emit <b>/<i> and escape 
 # --- Message constraints / formatting ---------------------------------------
 MAX_MESSAGE_CHARS = 4096            # Telegram's hard limit for a single message
 WEBSITE_BUTTON_LABEL = "Open the dashboard"
+BETPAWA_BUTTON_LABEL = "🎟 Bet on betPawa"
 
 
 def telegram_token() -> str | None:
