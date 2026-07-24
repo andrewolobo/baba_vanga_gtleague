@@ -46,6 +46,45 @@ class Settings(BaseSettings):
     betpawa_token: str = ""
     betpawa_cf_bm: str = ""
 
+    # sofifa external FC25 team ratings (docs/TEAM_RATINGS.md). Reference data,
+    # refreshed BY HAND via `python -m ratings_ingest.cli refresh` — never the
+    # predictor timer. sofifa is behind Cloudflare, so a request carries a
+    # cf_clearance cookie pasted from devtools: the whole cookie block (incl.
+    # teamCol columns and r=edition) lives in sofifa_cookie_file, IP+UA-bound
+    # and hours-valid, so a stale cookie 403s loudly. sofifa_cookie (env) wins
+    # if set, for CI/one-offs. The default /teams order is ~team-id, which
+    # scatters strong teams; the crawl requests col=oa&sort=desc and stops at
+    # sofifa_min_overall — the GT Leagues universe (real clubs + national
+    # teams) sits comfortably above it, and a floor keeps the crawl off
+    # sofifa's full ~15k-team catalog.
+    sofifa_base: str = "https://sofifa.com"
+    sofifa_cookie: str = ""
+    sofifa_cookie_file: Path = Path("data/auto-bet/cookie.txt")
+    # Cloudflare blocks at the TLS layer: the cookie only clears when the
+    # handshake also looks like Chrome, so the fetch impersonates it via
+    # curl_cffi. Keep this a real Chrome build (measured: httpx/curl.exe 403,
+    # curl_cffi 'chrome' 200 with the same cookie, 2026-07-22).
+    sofifa_impersonate: str = "chrome"
+    # The r= request param, but it is INERT on the /teams list. Measured
+    # 2026-07-22: codes 240050/250044/260045 all return the identical team set
+    # and overalls, and every team-link in the HTML embeds edition 250044 — so
+    # sofifa's live /teams roster is FC25 and FC26 is NOT retrievable here
+    # (chasing FC26 for Brazil et al. is moot: those nations are absent from
+    # every EA edition). The edition stored on each row is PARSED from the HTML
+    # (=250044), not taken from this value, so changing it does not change the
+    # data. Kept at the observed roster for honesty; it only ever rides r=.
+    sofifa_edition: str = "250044"
+    sofifa_request_delay_s: float = 1.5
+    # Overall floor for the desc-sorted crawl. 64 catches present-but-weak
+    # national teams (e.g. Qatar at 67) a few pages past the strong tier, while
+    # staying a small polite crawl. Many GT Leagues nations are ABSENT from EA
+    # FC under EVERY edition (Brazil/Belgium/Japan/Turkey… return zero on FC24,
+    # FC25 AND FC26 — verified 2026-07-22; the federations license to Konami,
+    # not EA). No floor and no edition recovers them; sofifa can only ever cover
+    # the CLUB slate + the licensed nations (docs/TEAM_RATINGS.md).
+    sofifa_min_overall: int = 64
+    sofifa_max_pages: int = 120
+
     # predictor serving knobs (Phase-4-validated defaults; see PHASE4_RESULTS.md)
     totals_source: str = "blend"  # blend | poisson (safe fallback, −0.4 AUC pts)
     totals_blend_weight: float = 0.7  # poisson share of the λ-blend

@@ -135,9 +135,31 @@ live switch — serving flipped on the first cycle after the code landed.
       §Phase 4).
 - [ ] **x12 hit rate** — judge vs the walk-forward 59% only after a few
       hundred graded picks in `settlements_x12`.
-- [ ] **Next regime switch** (World Cup ends) — watch `unresolved_clubs` in
-      cycle output; expect ~a week of cold clubs. A scorecard dip means the
-      unseen-club fallback is broken, not the feature.
+- [~] **Regime switch IN PROGRESS — club-pool rotation 2026-07-21** (the
+      "World Cup ends" switch). `competition` label stays "GT Leagues"; the
+      shift is in the roster: stable 45-club pool ≤07-20 → transition day
+      07-21 (52 distinct, 31 new club-appearances) → new 42-club set from
+      07-22. Since 07-21, ~11–13% of settled matches involve a club with no
+      pre-shift history (cold/fallback λ). Expect ~a week of cold clubs; a
+      scorecard dip is the transient, not a broken feature. Leak flags 0
+      throughout — pipeline healthy.
+- [ ] **Re-read O/U vs-book across the shift ~2026-07-28** — baseline read
+      done 2026-07-24 on the full `-recal2-h2h` generation (07-18..07-24,
+      1741 rows): headline HEALTHY — edge coef +0.536, CI [+0.12,+0.93],
+      P(>0)=0.99; conditional pace arm +2.9 AUC pts @4.5 / +4.0 @5.5. BUT
+      pre/post-21 split shows directional degradation NOT yet significant:
+        · pre-21  (≤07-20, n=759) edge +0.68; picks (n=210) edge +1.03, 62.9%
+        · post-21 (≥07-22, n=695) edge +0.35; picks (n=214) edge −0.53,
+          bootstrap CI [−1.80,+0.65], P(>0)=0.19 — noise, ~2.5d/214 picks
+      Damage concentrated at **line 4.5** post-shift (picks 50.6%, model
+      Brier 0.260 > book 0.253); lines 2.5/3.5/5.5 still beat book. Signature
+      = cold-club tail-line λ error, consistent with the fallback, NOT h2h
+      failing. ACTION: do NOT re-sweep/re-band (cold-club transient by
+      doctrine); let the 42-club pool warm ~a week, then rerun the
+      `--tag recal2-h2h` + kickoff-split read around 07-28 when post-shift n
+      ~doubles and the CI can resolve. If line 4.5 is STILL a coin flip on
+      picks at n>300 post-shift with clubs warmed, that is a real λ/pace tail
+      problem (candidate: the standing λ slope 1.24) — act then, not now.
 
 ## Build (when data or priorities allow)
 
@@ -171,3 +193,25 @@ live switch — serving flipped on the first cycle after the code landed.
 - [ ] **Club leaderboard product surface** — `PoissonModel.club_ratings()`
       already returns per-club `pace` / `strength` from the joint fit; a table
       in the web app is mostly presentation work.
+
+## Deferred to the next club-competition regime (World Cup ends)
+
+- [ ] **Club rivalry / H2H walk-forward gate** — the club-era re-evaluation
+      (docs/CLUB_FEATURE.md §Re-evaluation 2026-07-12) found a *real but small*
+      club×club matchup effect: ~0.05 goals stable, 18–26% split-half reliable,
+      **zero in the World Cup**. Not worth serving now. IF the league returns
+      to club competitions AND totals/1x2 edge is being actively hunted, gate a
+      shrunk club-pair interaction term against the live joint model. Prior on
+      what survives: the 18–26% reliability. Slightly more promising for 1x2
+      (strength) than totals (pace). Scratch scripts in the session archive.
+
+## Measured and closed (no action — recorded so they aren't re-explored)
+
+- [x] **Competition / league as a GLM feature** — measured 2026-07-12, **null**.
+      Walk-forward, competition fixed effect over player+home+club: ΔAUC ~0.00,
+      every CI spans zero, both eras. League-level scoring differences are fully
+      absorbed by the player and club entities. Do not add.
+- [x] **Club strength in isolation / club Elo** — measured 2026-07-12,
+      **redundant**. Isolation strength r=0.95–0.99 with the live joint
+      strength; walk-forward 1x2 gate ΔAUC −0.0009, Elo coef CI [−0.035,+0.040].
+      The served joint model already contains it. Do not add.

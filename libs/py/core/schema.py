@@ -89,6 +89,36 @@ class X12PredictionRow(BaseModel):
     as_of_cutoff_ts: datetime
 
 
+class TeamRatingRow(BaseModel):
+    """One team's external FC25 ratings from sofifa.com/teams, for one edition.
+
+    Reference data (docs/TEAM_RATINGS.md), keyed on (sofifa_id, edition). Every
+    rating is Optional: sofifa occasionally renders a blank cell, and a missing
+    number must not drop the whole row. Money fields are euros, already parsed
+    from sofifa's '€19.9M' / '€308.7M' notation. sofifa_name is clean UTF-8;
+    the join onto matches.*_club normalizes both sides (see store.team_aliases)."""
+
+    sofifa_id: int
+    edition: str  # roster version pin, e.g. '260045'
+    sofifa_name: str
+    nationality: str | None = None  # flag title; == country for national teams
+    league: str | None = None
+    league_id: int | None = None
+    is_national: bool = False
+    overall: int | None = None
+    attack: int | None = None
+    midfield: int | None = None
+    defence: int | None = None
+    domestic_prestige: int | None = None
+    international_prestige: int | None = None
+    num_players: int | None = None
+    starting_age: float | None = None
+    transfer_budget: float | None = None  # euros
+    club_worth: float | None = None       # euros
+    raw_hash: str  # sha1 of source cells, for idempotent upsert
+    scraped_at: datetime
+
+
 class OddsPrice(BaseModel):
     """One priced selection at one moment (append-only odds_snapshots row)."""
 

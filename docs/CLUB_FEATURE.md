@@ -464,3 +464,63 @@ plumbing is deliberately separate work. Shipping club to totals first was a
 strict prerequisite, since a 1x2 head on club-blind λs would inherit exactly
 the blindness measured above (and the vs-book table shows it: two-thirds of
 those rows are pre-club).
+
+## Re-evaluation: isolation strength, club Elo, and rivalry (2026-07-12)
+
+Prompted by the theory that FIFA clubs mirror real-life counterparts, so a
+"CLUB_STRENGTH" latent (and rivalries) could be intuned in **isolation of the
+player**. All measurement-only (scratch scripts, nothing shipped). The frame
+that matters: the baseline is the **live joint model** (player + club), never
+player-only — anything measured against player-only just rediscovers club.
+
+**Rotation makes isolation legitimate — my earlier blanket "no Elo, it absorbs
+player skill" was overstated.** Clubs rotate across players enough that the
+confound is small: side-row corr(player skill, club-isolation strength) =
++0.02 (club) / +0.04 (WC); the spread of driver-skill across clubs is only
+11% / 18% the size of the club-strength signal. So an isolation rating is
+defensible here. It is just not *new*.
+
+**Club Elo is redundant — measured three ways, the last one decisive.**
+1. Goals-based isolation strength (club-only Poisson catt−cdfn) vs joint
+   strength: r = **0.998 / 0.989**. (This is the same *lens* as the joint
+   model, so it overstates redundancy — do not quote it alone.)
+2. Literal Bradley–Terry Elo (outcome-based, margin discarded, players
+   ignored) vs joint strength: r = **0.952 (club) / 0.871 (WC)** — mostly
+   redundant, but with a 9–24% residual that argument alone can't dismiss.
+   Method-fragility flag: BT Elo vs sequential Elo agree only 0.46 / 0.55, so
+   the residual is probably noise.
+3. **Walk-forward 1x2 gate (the decisive test):** does the Elo add decisive
+   AUC over the served model's own implied 1x2 (blended λ → `x12_probs`),
+   stacker refit each eval day? **No.** ΔAUC −0.0009, 55 eval days, 10,892
+   decisive; pooled standardized Elo coef with the served score present =
+   **+0.003, CI [−0.035, +0.040]** — dead on zero. The residual was *largest*
+   in the World Cup (24%), which is exactly where the gate had the most power
+   (n=10,677) and is flat → the residual is noise. Elo carries nothing the
+   joint model lacks, for 1x2 or totals.
+   - Power caveat: the gate's club-era arm had only 215 decisive matches (the
+     55-day window is mostly WC), so the club era isn't independently
+     certified — but its residual was the *smaller* one (9%). Certifying it
+     would need an eval window reaching back into club competitions.
+
+**Rivalry / club H2H is the only genuinely new signal — real but small, and
+club-era only.** The additive GLM structurally cannot express a club×club
+matchup effect (λ depends on each club's rating separately). Screens:
+- *Feasibility/structure:* joint-residual chi²/dof by unordered club pair —
+  **World Cup 0.79 (pace) / 0.64 (strength): zero rivalry structure.** Club
+  competitions **2.29 (pace) / 1.66 (strength)**: strong, but a single full-era
+  fit confounds time-drift.
+- *Split-half control* (joint model refit within each time-half, so drift is
+  absorbed): within-half chi² stays elevated (pace 2.17 / 1.63) — not pure
+  drift — and cross-half **replication** (the reliability = stable fraction of
+  pair structure) is **+0.175 pace / +0.257 strength**, both CIs excluding
+  zero. So rivalry is *real* (replicates across disjoint periods, with
+  different players netted out each half) but only ~18–26% of the apparent
+  structure is stable → stable effect ≈ **0.05 goals** per matchup. Notably the
+  stable signal is slightly *stronger* for strength/1x2 than pace/totals,
+  reversing the full-era impression (the pace 2.29 was the more drift-inflated).
+
+**Verdict:** the club feature as implemented already extracts essentially all
+the club signal the current data supports. Isolation/Elo is redundant
+(confirmed out-of-sample). Rivalry is real but too small and too regime-specific
+(zero in the served World Cup) to serve now. Deferred to the next
+club-competition regime — see the rivalry-gate trigger in `TODO.md`.

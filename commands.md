@@ -83,6 +83,10 @@ python -m settlement.settle vs-book --days 30 --tag recal2-h2h
 
 
 python -m settlement.settle screen --days 7
+
+
+
+python -m ratings_ingest.cli refresh
 ```
 
 `--boot` sets the bootstrap resamples behind every confidence interval

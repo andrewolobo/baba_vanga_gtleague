@@ -37,6 +37,11 @@ def betpawa_raw() -> bytes:
     return (FIXTURES / "betpawa_gtleagues_2026-07-08.bin").read_bytes()
 
 
+@pytest.fixture(scope="session")
+def sofifa_html() -> str:
+    return (FIXTURES / "sofifa_teams_page.html").read_text(encoding="utf-8")
+
+
 @pytest.fixture
 def db(tmp_path):
     from store.db import connect

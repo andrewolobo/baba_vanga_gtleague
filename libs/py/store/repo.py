@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 
 from core.schema import (FixtureRow, MatchRow, OddsPrice, PredictionRow,
-                         X12PredictionRow)
+                         TeamRatingRow, X12PredictionRow)
 
 
 def _iso(dt: datetime) -> str:
@@ -148,6 +148,70 @@ class X12PredictionRepo:
                  for r in rows],
             )
         return len(rows)
+
+
+class TeamRatingRepo:
+    """External sofifa team ratings. Idempotent merge keyed on (sofifa_id,
+    edition); the raw_hash gate makes a re-scrape of an unchanged edition a
+    no-op, and lets a mid-edition sofifa correction refresh in place."""
+
+    _COLS = (
+        "sofifa_id", "edition", "sofifa_name", "nationality", "league",
+        "league_id", "is_national", "overall", "attack", "midfield", "defence",
+        "domestic_prestige", "international_prestige", "num_players",
+        "starting_age", "transfer_budget", "club_worth", "raw_hash", "scraped_at",
+    )
+
+    def __init__(self, conn: sqlite3.Connection):
+        self.conn = conn
+
+    def _values(self, r: TeamRatingRow) -> tuple:
+        return (
+            r.sofifa_id, r.edition, r.sofifa_name, r.nationality, r.league,
+            r.league_id, int(r.is_national), r.overall, r.attack, r.midfield,
+            r.defence, r.domestic_prestige, r.international_prestige,
+            r.num_players, r.starting_age, r.transfer_budget, r.club_worth,
+            r.raw_hash, _iso(r.scraped_at),
+        )
+
+    def upsert_many(self, rows: list[TeamRatingRow]) -> IngestReport:
+        rep = IngestReport()
+        placeholders = ",".join("?" * len(self._COLS))
+        insert = (f"INSERT INTO team_ratings ({','.join(self._COLS)})"
+                  f" VALUES ({placeholders})")
+        # every column but the (sofifa_id, edition) key is refreshed on change
+        mutable = [c for c in self._COLS if c not in ("sofifa_id", "edition")]
+        update = ("UPDATE team_ratings SET " + ",".join(f"{c}=?" for c in mutable)
+                  + " WHERE sofifa_id=? AND edition=?")
+        with self.conn:
+            for r in rows:
+                cur = self.conn.execute(
+                    "SELECT raw_hash FROM team_ratings"
+                    " WHERE sofifa_id=? AND edition=?",
+                    (r.sofifa_id, r.edition),
+                ).fetchone()
+                vals = self._values(r)
+                if cur is None:
+                    self.conn.execute(insert, vals)
+                    rep.inserted += 1
+                elif cur["raw_hash"] != r.raw_hash:
+                    self.conn.execute(
+                        update,
+                        tuple(vals[self._COLS.index(c)] for c in mutable)
+                        + (r.sofifa_id, r.edition),
+                    )
+                    rep.updated += 1
+                else:
+                    rep.unchanged += 1
+        return rep
+
+    def count(self, edition: str | None = None) -> int:
+        q = "SELECT COUNT(*) c FROM team_ratings"
+        args: tuple = ()
+        if edition is not None:
+            q += " WHERE edition = ?"
+            args = (edition,)
+        return self.conn.execute(q, args).fetchone()["c"]
 
 
 class OddsRepo:
